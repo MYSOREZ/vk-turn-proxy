@@ -15,6 +15,11 @@
 ```
 ### Клиент
 #### Android
+
+**Рекомендуемый способ:**
+Использовать нативное Android-приложение [vk-turn-proxy-android](https://github.com/MYSOREZ/vk-turn-proxy-android).
+
+**Альтернативный способ (через Termux):**
 - В клиентском конфиге WireGuard меняем адрес сервера на `127.0.0.1:9000`, ставим MTU 1280
 -  **Добавляем Termux в исключения WireGuard. Нажимаем "сохранить".**
 В Termux:
@@ -201,7 +206,7 @@ chmod 777 ./client-android
                 "domainStrategy": "UseIPv4"
             }
         }
-    ]
+  ]
 }
 ```
 
