@@ -28,7 +28,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
-	"github.com/pion/logging"
 	"github.com/pion/transport/v4/vnet"
 	"github.com/pion/turn/v5"
 )
@@ -39,24 +38,32 @@ func getVkCreds(link string) (string, string, string, error) {
 	jar, _ := cookiejar.New(nil)
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
-		// Создаем собственный дозвонщик для обхода проблемы с DNS на Android
 		dialer := &net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}
+
 		dialer.Resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				// Жестко направляем DNS-запросы на сервер Google
+				// Пытаемся 2 раза достучаться до Яндекса (на случай потери пакета)
+				for i := 0; i < 2; i++ {
+					conn, err := net.Dial("udp", "77.88.8.8:53")
+					if err == nil {
+						return conn, nil
+					}
+					time.Sleep(200 * time.Millisecond) // Микро-пауза перед повтором
+				}
+				// Если Яндекс не ответил, пробуем Google как последний шанс
 				return net.Dial("udp", "8.8.8.8:53")
 			},
 		}
 
 		client := &http.Client{
-			Timeout: 20 * time.Second,
+			Timeout: 25 * time.Second, // Чуть больше времени для мобильной сети
 			Jar:     jar,
 			Transport: &http.Transport{
-				DialContext:         dialer.DialContext, // Подключаем наш Dialer
+				DialContext:         dialer.DialContext,
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
@@ -98,7 +105,7 @@ func getVkCreds(link string) (string, string, string, error) {
 	var resp map[string]interface{}
 	var err error
 
-	// Шаг 1: Получаем первичный токен и КУКИ
+	// Шаг 1: Получаем куки сессии (Jar)
 	data := "client_secret=QbYic1K3lEV5kTGiqlq2&client_id=6287487&scopes=audio_anonymous%2Cvideo_anonymous%2Cphotos_anonymous%2Cprofile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id=6287487"
 	url := "https://login.vk.com/?act=get_anonym_token"
 	resp, err = doRequest(data, url)
@@ -106,7 +113,7 @@ func getVkCreds(link string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("step 1 error: %s", err)
 	}
 
-	// Шаг 2: Пропускаем мертвый Payload! Сразу берем токен сообщений, используя куки из Шага 1
+	// Шаг 2: Токен сообщений
 	data = "client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487"
 	url = "https://login.vk.com/?act=get_anonym_token"
 	resp, err = doRequest(data, url)
@@ -115,7 +122,7 @@ func getVkCreds(link string) (string, string, string, error) {
 	}
 	token3 := resp["data"].(map[string]interface{})["access_token"].(string)
 
-	// Шаг 3: Получаем анонимный токен звонка
+	// Шаг 3: Токен звонка
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token3)
 	url = "https://api.vk.com/method/calls.getAnonymousToken?v=5.264"
 	resp, err = doRequest(data, url)
@@ -124,7 +131,7 @@ func getVkCreds(link string) (string, string, string, error) {
 	}
 	token4 := resp["response"].(map[string]interface{})["token"].(string)
 
-	// Шаг 4: Логинимся в OKCDN (медиа-серверы ВК)
+	// Шаг 4: Авторизация в медиа-серверах ВК
 	data = fmt.Sprintf("session_data=%%7B%%22version%%22%%3A2%%2C%%22device_id%%22%%3A%%22%s%%22%%2C%%22client_version%%22%%3A1.1%%2C%%22client_type%%22%%3A%%22SDK_JS%%22%%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", uuid.New())
 	url = "https://calls.okcdn.ru/fb.do"
 	resp, err = doRequest(data, url)
@@ -133,7 +140,7 @@ func getVkCreds(link string) (string, string, string, error) {
 	}
 	token5 := resp["session_key"].(string)
 
-	// Шаг 5: Получаем логин, пароль и IP для TURN-сервера
+	// Шаг 5: Получение параметров TURN-сервера
 	data = fmt.Sprintf("joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s", link, token4, token5)
 	url = "https://calls.okcdn.ru/fb.do"
 	resp, err = doRequest(data, url)
@@ -585,191 +592,113 @@ type turnParams struct {
 func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UDPAddr, conn2 net.PacketConn, c chan<- error) {
 	var err error = nil
 	defer func() { c <- err }()
+
+	// 1. Быстрый Jitter
+	time.Sleep(time.Duration(time.Now().UnixNano()%300) * time.Millisecond)
+
 	user, pass, url, err1 := turnParams.getCreds(turnParams.link)
-	if err1 != nil {
-		err = fmt.Errorf("failed to get TURN credentials: %s", err1)
-		return
-	}
-	urlhost, urlport, err1 := net.SplitHostPort(url)
-	if err1 != nil {
-		err = fmt.Errorf("failed to parse TURN server address: %s", err1)
-		return
-	}
-	if turnParams.host != "" {
-		urlhost = turnParams.host
-	}
-	if turnParams.port != "" {
-		urlport = turnParams.port
-	}
-	var turnServerAddr string
-	turnServerAddr = net.JoinHostPort(urlhost, urlport)
-	turnServerUdpAddr, err1 := net.ResolveUDPAddr("udp", turnServerAddr)
-	if err1 != nil {
-		err = fmt.Errorf("failed to resolve TURN server address: %s", err1)
-		return
-	}
-	turnServerAddr = turnServerUdpAddr.String()
-	fmt.Println(turnServerUdpAddr.IP)
-	// Dial TURN Server
-	var cfg *turn.ClientConfig
-	var turnConn net.PacketConn
-	var d net.Dialer
-	ctx1, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if turnParams.udp {
-		conn, err2 := net.DialUDP("udp", nil, turnServerUdpAddr) // nolint: noctx
-		if err2 != nil {
-			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
-			return
-		}
-		defer func() {
-			if err1 = conn.Close(); err1 != nil {
-				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
-				return
-			}
-		}()
-		turnConn = &connectedUDPConn{conn}
-	} else {
-		conn, err2 := d.DialContext(ctx1, "tcp", turnServerAddr) // nolint: noctx
-		if err2 != nil {
-			err = fmt.Errorf("failed to connect to TURN server: %s", err2)
-			return
-		}
-		defer func() {
-			if err1 = conn.Close(); err1 != nil {
-				err = fmt.Errorf("failed to close TURN server connection: %s", err1)
-				return
-			}
-		}()
-		turnConn = turn.NewSTUNConn(conn)
-	}
-	var addrFamily turn.RequestedAddressFamily
-	if peer.IP.To4() != nil {
-		addrFamily = turn.RequestedAddressFamilyIPv4
-	} else {
-		addrFamily = turn.RequestedAddressFamilyIPv6
-	}
-	
-	// Создаем виртуальную сеть для Pion (обходит ошибку netlinkrib на Android)
-	vNet, err1 := vnet.NewNet(&vnet.NetConfig{})
-	if err1 != nil {
-		err = fmt.Errorf("failed to init vnet: %s", err1)
-		return
+	if err1 != nil { return }
+
+	urlhost, urlport, _ := net.SplitHostPort(url)
+	turnServerAddr := net.JoinHostPort(urlhost, urlport)
+	turnServerUdpAddr, _ := net.ResolveUDPAddr("udp", turnServerAddr)
+
+	conn, err2 := net.DialUDP("udp", nil, turnServerUdpAddr)
+	if err2 != nil { return }
+	defer conn.Close()
+
+	// Запоминаем текущий локальный IP для детекции смены сети
+	initialIP := ""
+	if ifaces, errI := net.Interfaces(); errI == nil {
+		initialIP = fmt.Sprintf("%v", ifaces)
 	}
 
-	// Start a new TURN Client and wrap our net.Conn in a STUNConn
-	// This allows us to simulate datagram based communication over a net.Conn
-	cfg = &turn.ClientConfig{
-		STUNServerAddr:         turnServerAddr,
-		TURNServerAddr:         turnServerAddr,
-		Conn:                   turnConn,
-		Username:               user,
-		Password:               pass,
-		RequestedAddressFamily: addrFamily,
-		LoggerFactory:          logging.NewDefaultLoggerFactory(),
-		Net:                    vNet, // Подменяем системную сеть на виртуальную
+	vNet, _ := vnet.NewNet(&vnet.NetConfig{})
+	cfg := &turn.ClientConfig{
+		STUNServerAddr: turnServerAddr,
+		TURNServerAddr: turnServerAddr,
+		Conn:           &connectedUDPConn{conn},
+		Username:       user,
+		Password:       pass,
+		Net:            vNet,
 	}
 
 	client, err1 := turn.NewClient(cfg)
-	if err1 != nil {
-		err = fmt.Errorf("failed to create TURN client: %s", err1)
-		return
-	}
+	if err1 != nil { return }
 	defer client.Close()
+	_ = client.Listen()
 
-	// Start listening on the conn provided.
-	err1 = client.Listen()
-	if err1 != nil {
-		err = fmt.Errorf("failed to listen: %s", err1)
-		return
-	}
-
-	// Allocate a relay socket on the TURN server. On success, it
-	// will return a net.PacketConn which represents the remote
-	// socket.
 	relayConn, err1 := client.Allocate()
-	if err1 != nil {
-		err = fmt.Errorf("failed to allocate: %s", err1)
-		return
-	}
-	defer func() {
-		if err1 := relayConn.Close(); err1 != nil {
-			err = fmt.Errorf("failed to close TURN allocated connection: %s", err1)
-		}
-	}()
+	if err1 != nil { return }
+	defer relayConn.Close()
 
-	// The relayConn's local address is actually the transport
-	// address assigned on the TURN server.
-	log.Printf("relayed-address=%s", relayConn.LocalAddr().String())
+	log.Printf("SUCCESS: %s", relayConn.LocalAddr().String())
 
 	wg := sync.WaitGroup{}
-	wg.Add(2)
+	wg.Add(3) // +1 для IP Watcher
 	turnctx, turncancel := context.WithCancel(context.Background())
-	context.AfterFunc(turnctx, func() {
-		relayConn.SetDeadline(time.Now())
-		conn2.SetDeadline(time.Now())
-	})
+	defer turncancel()
+
+	// 2. IP WATCHER: Детектор смены сети (Wi-Fi <-> LTE)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-turnctx.Done(): return
+			case <-ticker.C:
+				if ifaces, errI := net.Interfaces(); errI == nil {
+					currentIP := fmt.Sprintf("%v", ifaces)
+					if currentIP != initialIP {
+						log.Printf("NETWORK CHANGE DETECTED! Force restart...")
+						turncancel() // Мгновенно убиваем текущий туннель
+						return
+					}
+				}
+			}
+		}
+	}()
+
 	var addr atomic.Value
-	// Start read-loop on conn2 (output of DTLS)
-	go func() {
+	
+	// 3. Улучшенный Worker с таймаутами
+	worker := func(readConn net.PacketConn, writeConn net.PacketConn, toPeer bool) {
 		defer wg.Done()
 		defer turncancel()
 		buf := make([]byte, 1600)
 		for {
 			select {
-			case <-turnctx.Done():
-				return
+			case <-turnctx.Done(): return
 			default:
-			}
-			n, addr1, err1 := conn2.ReadFrom(buf)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
-			}
+				// Заставляем сокет просыпаться, чтобы проверить статус turnctx
+				readConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				
+				n, addr1, err1 := readConn.ReadFrom(buf)
+				if err1 != nil {
+					if nerr, ok := err1.(net.Error); ok && nerr.Timeout() {
+						continue // Просто проснулись по таймауту, идем на новый круг
+					}
+					return
+				}
 
-			addr.Store(addr1) // store peer
-
-			_, err1 = relayConn.WriteTo(buf[:n], peer)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
+				var target net.Addr
+				if toPeer {
+					addr.Store(addr1)
+					target = peer
+				} else {
+					a, ok := addr.Load().(net.Addr)
+					if !ok { continue }
+					target = a
+				}
+				_, _ = writeConn.WriteTo(buf[:n], target)
 			}
 		}
-	}()
+	}
 
-	// Start read-loop on relayConn
-	go func() {
-		defer wg.Done()
-		defer turncancel()
-		buf := make([]byte, 1600)
-		for {
-			select {
-			case <-turnctx.Done():
-				return
-			default:
-			}
-			n, _, err1 := relayConn.ReadFrom(buf)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
-			}
-			addr1, ok := addr.Load().(net.Addr)
-			if !ok {
-				log.Printf("Failed: no listener ip")
-				return
-			}
-
-			_, err1 = conn2.WriteTo(buf[:n], addr1)
-			if err1 != nil {
-				log.Printf("Failed: %s", err1)
-				return
-			}
-		}
-	}()
-
+	go worker(conn2, relayConn, true)
+	go worker(relayConn, conn2, false)
 	wg.Wait()
-	relayConn.SetDeadline(time.Time{})
-	conn2.SetDeadline(time.Time{})
 }
 
 func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConnChan <-chan net.PacketConn, connchan chan<- net.PacketConn, okchan chan<- struct{}) {
@@ -832,6 +761,7 @@ func main() { //nolint:cyclop
 	udp := flag.Bool("udp", false, "connect to TURN with UDP")
 	direct := flag.Bool("no-dtls", false, "connect without obfuscation. DO NOT USE")
 	flag.Parse()
+
 	if *peerAddr == "" {
 		log.Panicf("Need peer address!")
 	}
@@ -842,21 +772,39 @@ func main() { //nolint:cyclop
 	if (*vklink == "") == (*yalink == "") {
 		log.Panicf("Need either vk-link or yandex-link!")
 	}
+
 	var link string
 	var getCreds getCredsFunc
+
+	// Настройка менеджера сессий для обхода квот (Error 486)
+	var (
+		credsMu    sync.Mutex
+		cUser      string
+		cPass      string
+		cTurn      string
+		lastUpdate time.Time
+	)
+
 	if *vklink != "" {
 		parts := strings.Split(*vklink, "join/")
 		link = parts[len(parts)-1]
 		
-		var vkOnce sync.Once
-		var cachedUser, cachedPass, cachedTurn string
-		var cacheErr error
-		
+		// Новая логика: принудительное обновление ключей каждые 30 секунд при сбоях
 		getCreds = func(l string) (string, string, string, error) {
-			vkOnce.Do(func() {
-				cachedUser, cachedPass, cachedTurn, cacheErr = getVkCreds(l)
-			})
-			return cachedUser, cachedPass, cachedTurn, cacheErr
+			credsMu.Lock()
+			defer credsMu.Unlock()
+
+			if time.Since(lastUpdate) > 30*time.Second || cUser == "" {
+				u, p, t, err := getVkCreds(l)
+				if err == nil {
+					cUser, cPass, cTurn = u, p, t
+					lastUpdate = time.Now()
+					log.Printf("SESSION REFRESH: Got new credentials from VK")
+				} else {
+					return "", "", "", err
+				}
+			}
+			return cUser, cPass, cTurn, nil
 		}
 		
 		if *n <= 0 {
@@ -870,9 +818,11 @@ func main() { //nolint:cyclop
 			*n = 1
 		}
 	}
+
 	if idx := strings.IndexAny(link, "/?#"); idx != -1 {
 		link = link[:idx]
 	}
+
 	params := &turnParams{
 		*host,
 		*port,
@@ -882,7 +832,7 @@ func main() { //nolint:cyclop
 	}
 
 	listenConnChan := make(chan net.PacketConn)
-	listenConn, err := net.ListenPacket("udp", *listen) // nolint: noctx
+	listenConn, err := net.ListenPacket("udp", *listen) 
 	if err != nil {
 		log.Panicf("Failed to listen: %s", err)
 	}
