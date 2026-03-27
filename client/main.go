@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"os/signal"
 	"strings"
@@ -28,28 +29,47 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/logging"
+	"github.com/pion/transport/v4/vnet"
 	"github.com/pion/turn/v5"
 )
 
 type getCredsFunc func(string) (string, string, string, error)
 
 func getVkCreds(link string) (string, string, string, error) {
+	jar, _ := cookiejar.New(nil)
+
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
+		// Создаем собственный дозвонщик для обхода проблемы с DNS на Android
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		dialer.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				// Жестко направляем DNS-запросы на сервер Google
+				return net.Dial("udp", "8.8.8.8:53")
+			},
+		}
+
 		client := &http.Client{
 			Timeout: 20 * time.Second,
+			Jar:     jar,
 			Transport: &http.Transport{
+				DialContext:         dialer.DialContext, // Подключаем наш Dialer
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
 				IdleConnTimeout:     90 * time.Second,
 			},
 		}
 		defer client.CloseIdleConnections()
+
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(data)))
 		if err != nil {
 			return nil, err
 		}
 
-		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0")
+		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		httpResp, err := client.Do(req)
@@ -68,72 +88,57 @@ func getVkCreds(link string) (string, string, string, error) {
 			return nil, err
 		}
 
+		if errResp, hasErr := resp["error"]; hasErr {
+			return nil, fmt.Errorf("VK API Error: %v", errResp)
+		}
+
 		return resp, nil
 	}
 
 	var resp map[string]interface{}
-	defer func() {
-		if r := recover(); r != nil {
-			log.Panicf("get TURN creds error: %v\n\n", resp)
-		}
-	}()
+	var err error
 
+	// Шаг 1: Получаем первичный токен и КУКИ
 	data := "client_secret=QbYic1K3lEV5kTGiqlq2&client_id=6287487&scopes=audio_anonymous%2Cvideo_anonymous%2Cphotos_anonymous%2Cprofile_anonymous&isApiOauthAnonymEnabled=false&version=1&app_id=6287487"
-	url := "https://login.vk.ru/?act=get_anonym_token"
-
-	resp, err := doRequest(data, url)
-	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
-	}
-
-	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
-
-	data = fmt.Sprintf("access_token=%s", token1)
-	url = "https://api.vk.ru/method/calls.getAnonymousAccessTokenPayload?v=5.264&client_id=6287487"
-
+	url := "https://login.vk.com/?act=get_anonym_token"
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step 1 error: %s", err)
 	}
 
-	token2 := resp["response"].(map[string]interface{})["payload"].(string)
-
-	data = fmt.Sprintf("client_id=6287487&token_type=messages&payload=%s&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487", token2)
-	url = "https://login.vk.ru/?act=get_anonym_token"
-
+	// Шаг 2: Пропускаем мертвый Payload! Сразу берем токен сообщений, используя куки из Шага 1
+	data = "client_id=6287487&token_type=messages&client_secret=QbYic1K3lEV5kTGiqlq2&version=1&app_id=6287487"
+	url = "https://login.vk.com/?act=get_anonym_token"
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step 2 error: %s", err)
 	}
-
 	token3 := resp["data"].(map[string]interface{})["access_token"].(string)
 
+	// Шаг 3: Получаем анонимный токен звонка
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token3)
-	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.264"
-
+	url = "https://api.vk.com/method/calls.getAnonymousToken?v=5.264"
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step 3 error: %s", err)
 	}
-
 	token4 := resp["response"].(map[string]interface{})["token"].(string)
 
-	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
+	// Шаг 4: Логинимся в OKCDN (медиа-серверы ВК)
+	data = fmt.Sprintf("session_data=%%7B%%22version%%22%%3A2%%2C%%22device_id%%22%%3A%%22%s%%22%%2C%%22client_version%%22%%3A1.1%%2C%%22client_type%%22%%3A%%22SDK_JS%%22%%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", uuid.New())
 	url = "https://calls.okcdn.ru/fb.do"
-
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step 4 error: %s", err)
 	}
-
 	token5 := resp["session_key"].(string)
 
+	// Шаг 5: Получаем логин, пароль и IP для TURN-сервера
 	data = fmt.Sprintf("joinLink=%s&isVideo=false&protocolVersion=5&anonymToken=%s&method=vchat.joinConversationByLink&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s", link, token4, token5)
 	url = "https://calls.okcdn.ru/fb.do"
-
 	resp, err = doRequest(data, url)
 	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
+		return "", "", "", fmt.Errorf("step 5 error: %s", err)
 	}
 
 	user := resp["turn_server"].(map[string]interface{})["username"].(string)
@@ -644,6 +649,14 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	} else {
 		addrFamily = turn.RequestedAddressFamilyIPv6
 	}
+	
+	// Создаем виртуальную сеть для Pion (обходит ошибку netlinkrib на Android)
+	vNet, err1 := vnet.NewNet(&vnet.NetConfig{})
+	if err1 != nil {
+		err = fmt.Errorf("failed to init vnet: %s", err1)
+		return
+	}
+
 	// Start a new TURN Client and wrap our net.Conn in a STUNConn
 	// This allows us to simulate datagram based communication over a net.Conn
 	cfg = &turn.ClientConfig{
@@ -654,6 +667,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		Password:               pass,
 		RequestedAddressFamily: addrFamily,
 		LoggerFactory:          logging.NewDefaultLoggerFactory(),
+		Net:                    vNet, // Подменяем системную сеть на виртуальную
 	}
 
 	client, err1 := turn.NewClient(cfg)
@@ -833,7 +847,18 @@ func main() { //nolint:cyclop
 	if *vklink != "" {
 		parts := strings.Split(*vklink, "join/")
 		link = parts[len(parts)-1]
-		getCreds = getVkCreds
+		
+		var vkOnce sync.Once
+		var cachedUser, cachedPass, cachedTurn string
+		var cacheErr error
+		
+		getCreds = func(l string) (string, string, string, error) {
+			vkOnce.Do(func() {
+				cachedUser, cachedPass, cachedTurn, cacheErr = getVkCreds(l)
+			})
+			return cachedUser, cachedPass, cachedTurn, cacheErr
+		}
+		
 		if *n <= 0 {
 			*n = 16
 		}
