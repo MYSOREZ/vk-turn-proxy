@@ -37,6 +37,9 @@ type getCredsFunc func(string) (string, string, string, error)
 func getVkCreds(link string) (string, string, string, error) {
 	jar, _ := cookiejar.New(nil)
 
+	userAgent := getRandomProfile().UserAgent // Рандомный юзер-агент
+	generatedName := generateName("r")        // Рандомное имя
+
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
 		dialer := &net.Dialer{
 			Timeout:   10 * time.Second,
@@ -76,7 +79,7 @@ func getVkCreds(link string) (string, string, string, error) {
 			return nil, err
 		}
 
-		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+		req.Header.Add("User-Agent", userAgent)
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 		httpResp, err := client.Do(req)
@@ -123,7 +126,7 @@ func getVkCreds(link string) (string, string, string, error) {
 	token3 := resp["data"].(map[string]interface{})["access_token"].(string)
 
 	// Шаг 3: Токен звонка
-	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token3)
+	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&access_token=%s", link, generatedName, token3)
 	url = "https://api.vk.com/method/calls.getAnonymousToken?v=5.264"
 	resp, err = doRequest(data, url)
 	if err != nil {
@@ -162,7 +165,8 @@ func getYandexCreds(link string) (string, string, string, error) {
 	const debug = false
 	const telemostConfHost = "cloud-api.yandex.ru"
 	telemostConfPath := fmt.Sprintf("%s%s%s", "/telemost_front/v2/telemost/conferences/https%3A%2F%2Ftelemost.yandex.ru%2Fj%2F", link, "/connection?next_gen_media_platform_allowed=false")
-	const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"
+	userAgent := getRandomProfile().UserAgent // Рандомный юзер-агент
+	generatedName := generateName("r")        // Рандомное имя
 
 	type ConferenceResponse struct {
 		URI                 string `json:"uri"`
@@ -333,14 +337,14 @@ func getYandexCreds(link string) (string, string, string, error) {
 		UID: uuid.New().String(),
 		Hello: HelloPayload{
 			ParticipantMeta: PartMeta{
-				Name:        "Гость",
+				Name:        generatedName,
 				Role:        "SPEAKER",
 				Description: "",
 				SendAudio:   false,
 				SendVideo:   false,
 			},
 			ParticipantAttributes: PartAttrs{
-				Name:        "Гость",
+				Name:        generatedName,
 				Role:        "SPEAKER",
 				Description: "",
 			},
@@ -597,14 +601,18 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	time.Sleep(time.Duration(time.Now().UnixNano()%300) * time.Millisecond)
 
 	user, pass, url, err1 := turnParams.getCreds(turnParams.link)
-	if err1 != nil { return }
+	if err1 != nil {
+		return
+	}
 
 	urlhost, urlport, _ := net.SplitHostPort(url)
 	turnServerAddr := net.JoinHostPort(urlhost, urlport)
 	turnServerUdpAddr, _ := net.ResolveUDPAddr("udp", turnServerAddr)
 
 	conn, err2 := net.DialUDP("udp", nil, turnServerUdpAddr)
-	if err2 != nil { return }
+	if err2 != nil {
+		return
+	}
 	defer conn.Close()
 
 	// Запоминаем текущий локальный IP для детекции смены сети
@@ -624,12 +632,16 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}
 
 	client, err1 := turn.NewClient(cfg)
-	if err1 != nil { return }
+	if err1 != nil {
+		return
+	}
 	defer client.Close()
 	_ = client.Listen()
 
 	relayConn, err1 := client.Allocate()
-	if err1 != nil { return }
+	if err1 != nil {
+		return
+	}
 	defer relayConn.Close()
 
 	log.Printf("SUCCESS: %s", relayConn.LocalAddr().String())
@@ -646,7 +658,8 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		defer ticker.Stop()
 		for {
 			select {
-			case <-turnctx.Done(): return
+			case <-turnctx.Done():
+				return
 			case <-ticker.C:
 				if ifaces, errI := net.Interfaces(); errI == nil {
 					currentIP := fmt.Sprintf("%v", ifaces)
@@ -661,7 +674,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 	}()
 
 	var addr atomic.Value
-	
+
 	// 3. Улучшенный Worker с таймаутами
 	worker := func(readConn net.PacketConn, writeConn net.PacketConn, toPeer bool) {
 		defer wg.Done()
@@ -669,11 +682,12 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		buf := make([]byte, 1600)
 		for {
 			select {
-			case <-turnctx.Done(): return
+			case <-turnctx.Done():
+				return
 			default:
 				// Заставляем сокет просыпаться, чтобы проверить статус turnctx
 				readConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-				
+
 				n, addr1, err1 := readConn.ReadFrom(buf)
 				if err1 != nil {
 					if nerr, ok := err1.(net.Error); ok && nerr.Timeout() {
@@ -688,7 +702,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 					target = peer
 				} else {
 					a, ok := addr.Load().(net.Addr)
-					if !ok { continue }
+					if !ok {
+						continue
+					}
 					target = a
 				}
 				_, _ = writeConn.WriteTo(buf[:n], target)
@@ -788,7 +804,7 @@ func main() { //nolint:cyclop
 	if *vklink != "" {
 		parts := strings.Split(*vklink, "join/")
 		link = parts[len(parts)-1]
-		
+
 		// Новая логика: принудительное обновление ключей каждые 30 секунд при сбоях
 		getCreds = func(l string) (string, string, string, error) {
 			credsMu.Lock()
@@ -806,7 +822,7 @@ func main() { //nolint:cyclop
 			}
 			return cUser, cPass, cTurn, nil
 		}
-		
+
 		if *n <= 0 {
 			*n = 16
 		}
@@ -832,7 +848,7 @@ func main() { //nolint:cyclop
 	}
 
 	listenConnChan := make(chan net.PacketConn)
-	listenConn, err := net.ListenPacket("udp", *listen) 
+	listenConn, err := net.ListenPacket("udp", *listen)
 	if err != nil {
 		log.Panicf("Failed to listen: %s", err)
 	}
