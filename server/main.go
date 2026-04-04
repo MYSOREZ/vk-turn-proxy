@@ -89,7 +89,11 @@ func main() {
 		wg1.Add(1)
 		go func(conn net.Conn) {
 			defer wg1.Done()
-			defer conn.Close() // graceful shutdown
+			defer func() {
+				if closeErr := conn.Close(); closeErr != nil {
+					log.Printf("failed to close incoming connection: %s", closeErr)
+				}
+			}()
 			var err error = nil
 			log.Printf("Connection from %s\n", conn.RemoteAddr())
 			// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`
@@ -129,8 +133,12 @@ func main() {
 			wg.Add(2)
 			ctx2, cancel2 := context.WithCancel(ctx)
 			context.AfterFunc(ctx2, func() {
-				conn.SetDeadline(time.Now())
-				serverConn.SetDeadline(time.Now())
+				if err := conn.SetDeadline(time.Now()); err != nil {
+					log.Printf("failed to set incoming deadline: %s", err)
+				}
+				if err := serverConn.SetDeadline(time.Now()); err != nil {
+					log.Printf("failed to set outgoing deadline: %s", err)
+				}
 			})
 			go func() {
 				defer wg.Done()
@@ -142,14 +150,20 @@ func main() {
 						return
 					default:
 					}
-					conn.SetReadDeadline(time.Now().Add(time.Minute * 30))
+					if err1 := conn.SetReadDeadline(time.Now().Add(time.Minute * 30)); err1 != nil {
+						log.Printf("Failed: %s", err1)
+						return
+					}
 					n, err1 := conn.Read(buf)
 					if err1 != nil {
 						log.Printf("Failed: %s", err1)
 						return
 					}
 
-					serverConn.SetWriteDeadline(time.Now().Add(time.Minute * 30))
+					if err1 := serverConn.SetWriteDeadline(time.Now().Add(time.Minute * 30)); err1 != nil {
+						log.Printf("Failed: %s", err1)
+						return
+					}
 					_, err1 = serverConn.Write(buf[:n])
 					if err1 != nil {
 						log.Printf("Failed: %s", err1)
@@ -167,14 +181,20 @@ func main() {
 						return
 					default:
 					}
-					serverConn.SetReadDeadline(time.Now().Add(time.Minute * 30))
+					if err1 := serverConn.SetReadDeadline(time.Now().Add(time.Minute * 30)); err1 != nil {
+						log.Printf("Failed: %s", err1)
+						return
+					}
 					n, err1 := serverConn.Read(buf)
 					if err1 != nil {
 						log.Printf("Failed: %s", err1)
 						return
 					}
 
-					conn.SetWriteDeadline(time.Now().Add(time.Minute * 30))
+					if err1 := conn.SetWriteDeadline(time.Now().Add(time.Minute * 30)); err1 != nil {
+						log.Printf("Failed: %s", err1)
+						return
+					}
 					_, err1 = conn.Write(buf[:n])
 					if err1 != nil {
 						log.Printf("Failed: %s", err1)

@@ -13,11 +13,26 @@
 ```
 ./server -listen 0.0.0.0:56000 -connect 127.0.0.1:<порт wg>
 ```
+#### Docker
+Сборка образа:
+```
+docker build -t vk-turn-proxy .
+```
+
+Переменная окружения **CONNECT_ADDR** — адрес WireGuard (обязательный), например `192.168.1.10:51820`.
+
+Пример запуска:
+```
+docker run -p 56000:56000/udp -e CONNECT_ADDR=192.168.1.10:51820 vk-turn-proxy
+```
+
 ### Клиент
 #### Android
 
 **Рекомендуемый способ:**
 Использовать нативное Android-приложение [vk-turn-proxy-android](https://github.com/MYSOREZ/vk-turn-proxy-android).
+- В клиентском конфиге WireGuard меняем адрес сервера на `127.0.0.1:9000`, ставим MTU 1280
+-  **Добавляем приложение в исключения WireGuard. Нажимаем "сохранить".**
 
 **Альтернативный способ (через Termux):**
 - В клиентском конфиге WireGuard меняем адрес сервера на `127.0.0.1:9000`, ставим MTU 1280
@@ -206,7 +221,7 @@ chmod 777 ./client-android
                 "domainStrategy": "UseIPv4"
             }
         }
-  ]
+    ]
 }
 ```
 
