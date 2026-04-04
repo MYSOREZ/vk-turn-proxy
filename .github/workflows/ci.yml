@@ -1,0 +1,73 @@
+name: Build and Check
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: windows
+            arch: amd64
+          - os: android
+            arch: arm64
+          - os: darwin
+            arch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Antivirus Scan (ClamAV)
+        run: |
+          sudo apt-get update && sudo apt-get install clamav -y
+          # Мы проверим все файлы проекта, исключая .git и временные папки
+          clamscan -r --exclude-dir="\.git" .
+
+      - name: Build Client
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          filename="client-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "android" ]; then
+            filename="libvkturn-client-${{ matrix.arch }}.so"
+          elif [ "${{ matrix.os }}" = "windows" ]; then
+            filename="${filename}.exe"
+          fi
+          go build -v -ldflags "-s -w -checklinkname=0" -trimpath -o "dist/${filename}" ./client
+
+      - name: Build Server
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          filename="server-${{ matrix.os }}-${{ matrix.arch }}"
+          if [ "${{ matrix.os }}" = "android" ]; then
+            filename="libvkturn-server-${{ matrix.arch }}.so"
+          elif [ "${{ matrix.os }}" = "windows" ]; then
+            filename="${filename}.exe"
+          fi
+          go build -v -ldflags "-s -w -checklinkname=0" -trimpath -o "dist/${filename}" ./server
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
