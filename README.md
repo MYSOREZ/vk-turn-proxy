@@ -1,4 +1,8 @@
 # Good TURN
+![Build Status](https://github.com/MYSOREZ/vk-turn-proxy/actions/workflows/ci.yml/badge.svg)
+![Security Scan](https://github.com/MYSOREZ/vk-turn-proxy/actions/workflows/codeql.yml/badge.svg)
+![Latest Release](https://img.shields.io/github/v/release/MYSOREZ/vk-turn-proxy)
+
 Проброс трафика WireGuard/Hysteria через TURN сервера VK звонков или Яндекс телемоста. Пакеты шифруются DTLS 1.2, затем параллельными потоками через TCP или UDP отправляются на TURN сервер по протоколу STUN ChannelData. Оттуда по UDP отправляются на ваш сервер, где расшифровываются и передаются в WireGuard. Логин/пароль от TURN генерируются из ссылки на звонок.
 
 Только для учебных целей!
