@@ -180,8 +180,8 @@ func (s *captchaV2Session) solveOnce(captchaErr *VkCaptchaError) (string, error)
 	log.Printf("v2 captcha pow solved")
 
 	base := captchaV2BaseValues(captchaErr.SessionToken)
-	if _, err := s.captchaRequest("captchaNotRobot.settings", base); err != nil {
-		return "", fmt.Errorf("captcha settings failed: %w", err)
+	if _, settingsErr := s.captchaRequest("captchaNotRobot.settings", base); settingsErr != nil {
+		return "", fmt.Errorf("captcha settings failed: %w", settingsErr)
 	}
 
 	browserFP, err := captchaV2BrowserFP()
@@ -233,7 +233,9 @@ func (s *captchaV2Session) solveOnce(captchaErr *VkCaptchaError) (string, error)
 		showType = stErr.ShowType
 	}
 
-	_, _ = s.captchaRequest("captchaNotRobot.endSession", base)
+	if _, endErr := s.captchaRequest("captchaNotRobot.endSession", base); endErr != nil {
+		log.Printf("v2 captcha endSession failed: %v", endErr)
+	}
 	return token, nil
 }
 
@@ -269,7 +271,10 @@ func (s *captchaV2Session) fetchCaptchaHTML(redirectURI string) (string, error) 
 
 func (s *captchaV2Session) fetchDebugInfo(scriptURL string) (string, error) {
 	if cached, ok := captchaV2DebugCache.Load(scriptURL); ok {
-		return cached.(string), nil
+		if cachedDebugInfo, ok := cached.(string); ok {
+			return cachedDebugInfo, nil
+		}
+		captchaV2DebugCache.Delete(scriptURL)
 	}
 	body, err := s.doRaw(fhttp.MethodGet, scriptURL, nil, map[string]string{
 		"Accept":  "text/javascript,*/*",

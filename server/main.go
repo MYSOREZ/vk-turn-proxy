@@ -284,14 +284,6 @@ type bondFrame struct {
 	data []byte
 }
 
-func readBondHello(r io.Reader) (bondHello, error) {
-	var hdr [17]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return bondHello{}, err
-	}
-	return parseBondHelloHeader(hdr[:])
-}
-
 func readBondHelloAfterMagic(r io.Reader, magic [4]byte) (bondHello, error) {
 	var hdr [17]byte
 	copy(hdr[0:4], magic[:])
@@ -660,10 +652,6 @@ func (c *bondServerConn) writeToNextLane(typ byte, seq uint64, data []byte, lane
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-}
-
-func handleBondServerStream(ctx context.Context, stream *smux.Stream, connectAddr string) {
-	handleBondServerStreamWithHello(ctx, stream, connectAddr, readBondHello)
 }
 
 func handleBondServerStreamAfterMagic(ctx context.Context, stream *smux.Stream, connectAddr string, magic [4]byte) {
