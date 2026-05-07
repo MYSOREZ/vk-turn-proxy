@@ -72,6 +72,12 @@ var (
 	captchaSolverVersion string
 )
 
+func debugf(format string, v ...any) {
+	if isDebug {
+		log.Printf(format, v...)
+	}
+}
+
 type captchaSolveMode int
 
 const (
@@ -142,6 +148,10 @@ func (s *throughputStats) addRx(n int) {
 }
 
 func (s *throughputStats) logEvery(ctx context.Context, label, txName, rxName string) {
+	if !isDebug {
+		return
+	}
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -162,7 +172,7 @@ func (s *throughputStats) logEvery(ctx context.Context, label, txName, rxName st
 				continue
 			}
 
-			log.Printf(
+			debugf(
 				"%s throughput: %s=%s %s=%s total_%s=%s total_%s=%s",
 				label,
 				txName,
@@ -1775,7 +1785,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		return
 	}
 	turnServerAddr = turnServerUDPAddr.String()
-	fmt.Println(turnServerUDPAddr.IP)
+	debugf("[STREAM %d] TURN server IP: %s", streamID, turnServerUDPAddr.IP)
 	var cfg *turn.ClientConfig
 	var turnConn net.PacketConn
 	var d net.Dialer
@@ -2468,13 +2478,13 @@ func handleBondedTCP(ctx context.Context, tcpConn net.Conn, connID uint64, candi
 		}
 	})
 
-	log.Printf("[bond %d] TCP accept from=%s lanes=%d [%s]", connID, tcpConn.RemoteAddr(), len(lanes), strings.Join(laneIDs, ","))
+	debugf("[bond %d] TCP accept from=%s lanes=%d [%s]", connID, tcpConn.RemoteAddr(), len(lanes), strings.Join(laneIDs, ","))
 	defer func() {
 		for _, lane := range lanes {
 			_ = lane.stream.Close()
 			active := lane.ps.active.Add(-1)
 			closed := lane.ps.closed.Add(1)
-			log.Printf("[bond %d] lane session %d close active=%d closed=%d totals: to-session=%s from-session=%s",
+			debugf("[bond %d] lane session %d close active=%d closed=%d totals: to-session=%s from-session=%s",
 				connID, lane.ps.id, active, closed,
 				formatByteCount(lane.ps.toSession.Load()), formatByteCount(lane.ps.fromSession.Load()))
 		}
@@ -2494,7 +2504,7 @@ func handleBondedTCP(ctx context.Context, tcpConn net.Conn, connID uint64, candi
 					case <-ctx.Done():
 					default:
 						if err != io.EOF {
-							log.Printf("[bond %d] session %d read frame error: %v", connID, l.ps.id, err)
+							debugf("[bond %d] session %d read frame error: %v", connID, l.ps.id, err)
 						}
 					}
 					return
@@ -2561,7 +2571,7 @@ func copyTCPToBond(ctx context.Context, connID uint64, tcpConn net.Conn, lanes [
 					log.Printf("[bond %d] session %d write FIN error: %v", connID, lane.ps.id, writeErr)
 				}
 			}
-			log.Printf("[bond %d] upload finished chunks=%d", connID, seq)
+			debugf("[bond %d] upload finished chunks=%d", connID, seq)
 			return
 		}
 		select {
@@ -2605,7 +2615,7 @@ func copyBondToTCP(ctx context.Context, connID uint64, tcpConn net.Conn, recvCh 
 	for {
 		if finSeq != nil && expect == *finSeq {
 			closeWrite(tcpConn)
-			log.Printf("[bond %d] download finished chunks=%d", connID, expect)
+			debugf("[bond %d] download finished chunks=%d", connID, expect)
 			return
 		}
 
@@ -2740,7 +2750,7 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 		connID := pool.nextConnID()
 		opened := ps.opened.Add(1)
 		active := ps.active.Add(1)
-		log.Printf("[session %d] TCP accept #%d from=%s active=%d opened=%d pool=%d",
+		debugf("[session %d] TCP accept #%d from=%s active=%d opened=%d pool=%d",
 			ps.id, connID, tcpConn.RemoteAddr(), active, opened, pool.count())
 
 		wgConn.Add(1)
@@ -2750,7 +2760,7 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 			defer func() {
 				active := ps.active.Add(-1)
 				closed := ps.closed.Add(1)
-				log.Printf("[session %d] TCP close #%d active=%d closed=%d totals: to-session=%s from-session=%s",
+				debugf("[session %d] TCP close #%d active=%d closed=%d totals: to-session=%s from-session=%s",
 					ps.id, connID, active, closed,
 					formatByteCount(ps.toSession.Load()), formatByteCount(ps.fromSession.Load()))
 			}()
@@ -2764,7 +2774,7 @@ func runVLESSMode(ctx context.Context, tp *turnParams, peer *net.UDPAddr, listen
 			fromSession, toSession := pipe(ctx, tc, stream)
 			ps.fromSession.Add(uint64(fromSession))
 			ps.toSession.Add(uint64(toSession))
-			log.Printf("[session %d] TCP done #%d local<-session=%s local->session=%s",
+			debugf("[session %d] TCP done #%d local<-session=%s local->session=%s",
 				ps.id, connID, formatByteCount(uint64(fromSession)), formatByteCount(uint64(toSession)))
 		}(tcpConn, ps, connID)
 	}
@@ -2846,7 +2856,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("resolve TURN addr: %w", err)
 	}
 	turnServerAddr = turnServerUDPAddr.String()
-	fmt.Println(turnServerUDPAddr.IP)
+	debugf("[session %d] TURN server IP: %s", id, turnServerUDPAddr.IP)
 
 	// 2. Connect to TURN server
 	var turnConn net.PacketConn
@@ -2902,7 +2912,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("TURN allocate: %w", err)
 	}
 	cleanupFns = append(cleanupFns, func() { _ = relayConn.Close() })
-	log.Printf("relayed-address=%s", relayConn.LocalAddr().String())
+	debugf("relayed-address=%s", relayConn.LocalAddr().String())
 
 	// 4. Establish DTLS over TURN relay
 	certificate, err := selfsign.GenerateSelfSigned()
@@ -2930,7 +2940,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("DTLS handshake: %w", err)
 	}
 	cleanupFns = append(cleanupFns, func() { _ = dtlsConn.Close() })
-	log.Printf("DTLS connection established")
+	debugf("DTLS connection established")
 
 	// 5. Create KCP session over DTLS
 	statsCtx, statsCancel := context.WithCancel(ctx)
@@ -2944,7 +2954,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("KCP session: %w", err)
 	}
 	cleanupFns = append(cleanupFns, func() { _ = kcpSess.Close() })
-	log.Printf("KCP session established")
+	debugf("KCP session established")
 
 	// 6. Create smux client session over KCP
 	smuxSess, err := smux.Client(kcpSess, tcputil.DefaultSmuxConfig())
@@ -2953,7 +2963,7 @@ func createSmuxSession(ctx context.Context, tp *turnParams, peer *net.UDPAddr, i
 		return nil, nil, fmt.Errorf("smux client: %w", err)
 	}
 	cleanupFns = append(cleanupFns, func() { _ = smuxSess.Close() })
-	log.Printf("smux session established")
+	debugf("smux session established")
 
 	return smuxSess, cleanup, nil
 }

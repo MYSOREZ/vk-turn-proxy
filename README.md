@@ -317,6 +317,7 @@ docker build -t vk-turn-proxy .
 | `-wrap` | `false` | включить WRAP-обфускацию |
 | `-wrap-key` | пусто | 32-байтный ключ в hex, 64 символа |
 | `-gen-wrap-key` | `false` | напечатать новый WRAP-ключ и выйти |
+| `-debug` | `false` | подробные логи |
 
 ## Captcha
 

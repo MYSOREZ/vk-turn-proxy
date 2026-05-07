@@ -23,6 +23,14 @@ import (
 	"github.com/xtaci/smux"
 )
 
+var isDebug bool
+
+func debugf(format string, v ...any) {
+	if isDebug {
+		log.Printf(format, v...)
+	}
+}
+
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "listen on ip:port")
 	connect := flag.String("connect", "", "connect to ip:port")
@@ -31,7 +39,9 @@ func main() {
 	wrapMode := flag.Bool("wrap", false, "WRAP mode: ChaCha20-XOR obfuscate DTLS packets before they reach TURN ChannelData")
 	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex-encoded shared key for -wrap (64 hex chars)")
 	genWrapKey := flag.Bool("gen-wrap-key", false, "print a fresh 64-character hex key for -wrap-key and exit")
+	debugFlag := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
+	isDebug = *debugFlag
 
 	if *genWrapKey {
 		key := make([]byte, wrapKeyLen)
@@ -135,7 +145,7 @@ func main() {
 					log.Printf("failed to close incoming connection: %s", closeErr)
 				}
 			}()
-			log.Printf("Connection from %s\n", conn.RemoteAddr())
+			debugf("Connection from %s\n", conn.RemoteAddr())
 
 			// Perform the handshake with a 30-second timeout
 			ctx1, cancel1 := context.WithTimeout(ctx, 30*time.Second)
@@ -146,12 +156,12 @@ func main() {
 				log.Println("Type error: expected *dtls.Conn")
 				return
 			}
-			log.Println("Start handshake")
+			debugf("Start handshake")
 			if err := dtlsConn.HandshakeContext(ctx1); err != nil {
 				log.Printf("Handshake failed: %v", err)
 				return
 			}
-			log.Println("Handshake done")
+			debugf("Handshake done")
 
 			if *vlessMode {
 				handleVLESSConnection(ctx, dtlsConn, *connect, *vlessBond)
@@ -159,7 +169,7 @@ func main() {
 				handleUDPConnection(ctx, conn, *connect)
 			}
 
-			log.Printf("Connection closed: %s\n", conn.RemoteAddr())
+			debugf("Connection closed: %s\n", conn.RemoteAddr())
 		}(conn)
 	}
 }
@@ -182,6 +192,10 @@ func (s *throughputStats) addRx(n int) {
 }
 
 func (s *throughputStats) logEvery(ctx context.Context, label, txName, rxName string) {
+	if !isDebug {
+		return
+	}
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -202,7 +216,7 @@ func (s *throughputStats) logEvery(ctx context.Context, label, txName, rxName st
 				continue
 			}
 
-			log.Printf(
+			debugf(
 				"%s throughput: %s=%s %s=%s total_%s=%s total_%s=%s",
 				label,
 				txName,
@@ -353,7 +367,7 @@ func closeWrite(conn net.Conn) {
 	}
 	if cw, ok := conn.(closeWriter); ok {
 		if err := cw.CloseWrite(); err != nil {
-			log.Printf("CloseWrite failed: %v", err)
+			debugf("CloseWrite failed: %v", err)
 		}
 	}
 }
@@ -423,7 +437,7 @@ func (c *bondServerConn) addLane(l *bondServerLane, laneCount uint16) {
 	c.lanes = append(c.lanes, l)
 	count := len(c.lanes)
 	c.lanesMu.Unlock()
-	log.Printf("[bond %d] lane %d attached (lanes=%d)", c.id, l.index, count)
+	debugf("[bond %d] lane %d attached (lanes=%d)", c.id, l.index, count)
 	select {
 	case c.ready <- struct{}{}:
 	default:
@@ -471,7 +485,7 @@ func (c *bondServerConn) waitForInitialLanes() {
 			return
 		case <-c.ready:
 		case <-timer.C:
-			log.Printf("[bond %d] starting with %d/%d lanes after attach timeout", c.id, count, want)
+			debugf("[bond %d] starting with %d/%d lanes after attach timeout", c.id, count, want)
 			return
 		}
 	}
@@ -486,7 +500,7 @@ func (c *bondServerConn) readLane(l *bondServerLane) {
 			case <-c.ctx.Done():
 			default:
 				if err != io.EOF {
-					log.Printf("[bond %d] lane %d read error: %v (lanes=%d)", c.id, l.index, err, left)
+					debugf("[bond %d] lane %d read error: %v (lanes=%d)", c.id, l.index, err, left)
 				}
 				if left == 0 {
 					c.cancel()
@@ -529,7 +543,7 @@ func (c *bondServerConn) run() {
 			}
 		}
 	})
-	log.Printf("[bond %d] backend connected", c.id)
+	debugf("[bond %d] backend connected", c.id)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -553,7 +567,7 @@ func (c *bondServerConn) copyBondToBackend(backendConn net.Conn) {
 	for {
 		if finSeq != nil && expect == *finSeq {
 			closeWrite(backendConn)
-			log.Printf("[bond %d] upload to backend finished chunks=%d", c.id, expect)
+			debugf("[bond %d] upload to backend finished chunks=%d", c.id, expect)
 			return
 		}
 
@@ -617,7 +631,7 @@ func (c *bondServerConn) copyBackendToBond(backendConn net.Conn) {
 					log.Printf("[bond %d] lane %d write FIN error: %v", c.id, lane.index, writeErr)
 				}
 			}
-			log.Printf("[bond %d] download from backend finished chunks=%d", c.id, seq)
+			debugf("[bond %d] download from backend finished chunks=%d", c.id, seq)
 			return
 		}
 		select {
@@ -822,7 +836,7 @@ func handleVLESSConnection(ctx context.Context, dtlsConn net.Conn, connectAddr s
 			log.Printf("failed to close KCP session: %v", closeErr)
 		}
 	}()
-	log.Printf("KCP session established (server)")
+	debugf("KCP session established (server)")
 
 	// 2. Create smux server session over KCP
 	smuxSess, err := smux.Server(kcpSess, tcputil.DefaultSmuxConfig())
@@ -835,7 +849,7 @@ func handleVLESSConnection(ctx context.Context, dtlsConn net.Conn, connectAddr s
 			log.Printf("failed to close smux session: %v", err)
 		}
 	}()
-	log.Printf("smux session established (server)")
+	debugf("smux session established (server)")
 
 	// 3. Accept smux streams and forward to backend via TCP
 	var wg sync.WaitGroup
@@ -863,7 +877,7 @@ func handleVLESSConnection(ctx context.Context, dtlsConn net.Conn, connectAddr s
 				return
 			}
 			if string(prefix[:]) == bondMagic {
-				log.Printf("auto-detected bond smux stream")
+				debugf("auto-detected bond smux stream")
 				handleBondServerStreamAfterMagic(ctx, s, connectAddr, prefix)
 				return
 			}
@@ -903,10 +917,10 @@ func pipeConn(ctx context.Context, c1, c2 net.Conn) {
 
 	context.AfterFunc(ctx2, func() {
 		if err := c1.SetDeadline(time.Now()); err != nil {
-			log.Printf("pipeConn: failed to set deadline c1: %v", err)
+			debugf("pipeConn: failed to set deadline c1: %v", err)
 		}
 		if err := c2.SetDeadline(time.Now()); err != nil {
-			log.Printf("pipeConn: failed to set deadline c2: %v", err)
+			debugf("pipeConn: failed to set deadline c2: %v", err)
 		}
 	})
 
@@ -916,14 +930,14 @@ func pipeConn(ctx context.Context, c1, c2 net.Conn) {
 	go func() {
 		defer wg.Done()
 		if _, err := io.Copy(c1, c2); err != nil {
-			log.Printf("pipeConn: c1<-c2 copy error: %v", err)
+			debugf("pipeConn: c1<-c2 copy error: %v", err)
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
 		if _, err := io.Copy(c2, c1); err != nil {
-			log.Printf("pipeConn: c2<-c1 copy error: %v", err)
+			debugf("pipeConn: c2<-c1 copy error: %v", err)
 		}
 	}()
 
@@ -931,9 +945,9 @@ func pipeConn(ctx context.Context, c1, c2 net.Conn) {
 
 	// Reset deadlines (best-effort; connection may already be closed)
 	if err := c1.SetDeadline(time.Time{}); err != nil {
-		log.Printf("pipeConn: failed to reset deadline c1: %v", err)
+		debugf("pipeConn: failed to reset deadline c1: %v", err)
 	}
 	if err := c2.SetDeadline(time.Time{}); err != nil {
-		log.Printf("pipeConn: failed to reset deadline c2: %v", err)
+		debugf("pipeConn: failed to reset deadline c2: %v", err)
 	}
 }
