@@ -835,14 +835,30 @@ var credentialsStore = struct {
 var streamServerOffsets sync.Map // map[int]*atomic.Uint64
 var turnServerCooldowns sync.Map // map[string]*atomic.Int64
 
-func getStreamServerOffset(streamID int) uint64 {
+func streamServerOffset(streamID int) *atomic.Uint64 {
 	v, _ := streamServerOffsets.LoadOrStore(streamID, &atomic.Uint64{})
-	return v.(*atomic.Uint64).Load()
+	offset, ok := v.(*atomic.Uint64)
+	if !ok {
+		panic(fmt.Sprintf("unexpected streamServerOffsets value type: %T", v))
+	}
+	return offset
+}
+
+func turnServerCooldownUntil(addr string) *atomic.Int64 {
+	v, _ := turnServerCooldowns.LoadOrStore(addr, &atomic.Int64{})
+	until, ok := v.(*atomic.Int64)
+	if !ok {
+		panic(fmt.Sprintf("unexpected turnServerCooldowns value type: %T", v))
+	}
+	return until
+}
+
+func getStreamServerOffset(streamID int) uint64 {
+	return streamServerOffset(streamID).Load()
 }
 
 func rotateStreamServer(streamID int) uint64 {
-	v, _ := streamServerOffsets.LoadOrStore(streamID, &atomic.Uint64{})
-	return v.(*atomic.Uint64).Add(1)
+	return streamServerOffset(streamID).Add(1)
 }
 
 func pickStreamServerAddr(streamID int, addrs []string) string {
@@ -858,8 +874,7 @@ func pickStreamServerAddr(streamID int, addrs []string) string {
 }
 
 func markTURNServerCooldown(addr string) {
-	v, _ := turnServerCooldowns.LoadOrStore(addr, &atomic.Int64{})
-	v.(*atomic.Int64).Store(time.Now().Add(turnServerCooldown).UnixNano())
+	turnServerCooldownUntil(addr).Store(time.Now().Add(turnServerCooldown).UnixNano())
 }
 
 func isTURNServerAvailable(addr string) bool {
@@ -867,7 +882,11 @@ func isTURNServerAvailable(addr string) bool {
 	if !ok {
 		return true
 	}
-	return time.Now().UnixNano() >= v.(*atomic.Int64).Load()
+	until, ok := v.(*atomic.Int64)
+	if !ok {
+		panic(fmt.Sprintf("unexpected turnServerCooldowns value type: %T", v))
+	}
+	return time.Now().UnixNano() >= until.Load()
 }
 
 func getStreamCache(streamID int) *StreamCredentialsCache {
