@@ -517,7 +517,10 @@ func ParseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	}
 
 	// Extract captcha_img (optional: absent in the v2 redirect_uri flow).
-	captchaImg, _ := errData["captcha_img"].(string)
+	captchaImg, imgOk := errData["captcha_img"].(string)
+	if !imgOk {
+		captchaImg = ""
+	}
 
 	// Extract error_msg
 	errorMsg, ok := errData["error_msg"].(string)
@@ -1346,7 +1349,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 			// error_code:14 that did not pass IsCaptchaError means VK changed the
 			// challenge shape again — surface the raw map under -debug so the next
 			// breakage is diagnosable without a code change.
-			if code, _ := errObj["error_code"].(float64); int(code) == 14 {
+			if code, codeOk := errObj["error_code"].(float64); codeOk && int(code) == 14 {
 				debugThrottledf("captcha-unrecognized",
 					"[STREAM %d] [Captcha][debug] error_code:14 not recognized as solvable captcha, raw=%v",
 					streamID, errObj)
