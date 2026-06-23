@@ -172,6 +172,14 @@ func (s *captchaV2Session) solveOnce(captchaErr *VkCaptchaError) (string, error)
 		return "", errors.New("failed to find slider captcha settings")
 	}
 
+	pageShowType := ""
+	if page.Init != nil {
+		pageShowType = page.Init.Data.ShowCaptchaType
+	}
+	debugThrottledf("captcha-v2-page",
+		"[Captcha][debug] v2 page parsed show_type=%q pow_difficulty=%d slider_available=%t script=%s html_len=%d",
+		pageShowType, page.PowDifficulty, sliderSettings != "", page.ScriptURL, len(html))
+
 	log.Printf("v2 captcha solving pow difficulty=%d", page.PowDifficulty)
 	hash := solveCaptchaPoWV2(s.ctx, page.PowInput, page.PowDifficulty)
 	if hash == "" {

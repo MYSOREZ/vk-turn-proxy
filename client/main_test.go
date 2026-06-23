@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"strings"
+	"testing"
+)
 
 func TestCaptchaSolveModeForAttempt(t *testing.T) {
 	t.Parallel()
@@ -109,5 +114,33 @@ func TestParseVkCaptchaErrorLegacySid(t *testing.T) {
 	}
 	if captchaErr.CaptchaImg == "" {
 		t.Fatal("expected captcha_img to be preserved")
+	}
+}
+
+func TestDebugThrottledfSuppressesRepeats(t *testing.T) {
+	// Not parallel: mutates package-global isDebug and log output.
+	prevDebug := isDebug
+	isDebug = true
+	defer func() { isDebug = prevDebug }()
+
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+
+	key := "test-throttle-" + t.Name()
+	debugThrottleState.Delete(key)
+
+	for i := 0; i < 5; i++ {
+		debugThrottledf(key, "tick %d", i)
+	}
+
+	if got := strings.Count(buf.String(), "tick "); got != 1 {
+		t.Fatalf("expected throttle to emit exactly once within interval, got %d lines: %q", got, buf.String())
 	}
 }

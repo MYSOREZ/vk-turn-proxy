@@ -78,6 +78,58 @@ func debugf(format string, v ...any) {
 	}
 }
 
+// debugThrottleInterval is the minimum gap between two emissions of the same
+// throttled debug key. It keeps verbose per-stream diagnostics readable when
+// many streams hit the same code path at once (e.g. all of them getting the
+// same captcha challenge within a second).
+const debugThrottleInterval = 3 * time.Second
+
+var debugThrottleState sync.Map // key string -> *atomic.Int64 (last emit, unix nano)
+
+// debugThrottledf logs like debugf but at most once per debugThrottleInterval
+// for a given key. Use distinct keys for distinct message groups.
+func debugThrottledf(key, format string, v ...any) {
+	if !isDebug {
+		return
+	}
+	now := time.Now().UnixNano()
+	val, _ := debugThrottleState.LoadOrStore(key, new(atomic.Int64))
+	last, ok := val.(*atomic.Int64)
+	if !ok {
+		return
+	}
+	prev := last.Load()
+	if prev != 0 && now-prev < int64(debugThrottleInterval) {
+		return
+	}
+	// CompareAndSwap ensures only one goroutine wins the slot per interval.
+	if !last.CompareAndSwap(prev, now) {
+		return
+	}
+	log.Printf(format, v...)
+}
+
+// debugCaptchaError emits a throttled, human-readable breakdown of a captcha
+// challenge: the parsed fields plus a redacted session_token preview, without
+// dumping the multi-kilobyte raw redirect_uri on every stream.
+func debugCaptchaError(streamID int, c *VkCaptchaError) {
+	if !isDebug || c == nil {
+		return
+	}
+	redirectBase := c.RedirectURI
+	if u, err := neturl.Parse(c.RedirectURI); err == nil {
+		redirectBase = u.Scheme + "://" + u.Host + u.Path
+	}
+	tokenPreview := c.SessionToken
+	if len(tokenPreview) > 12 {
+		tokenPreview = tokenPreview[:12] + "…"
+	}
+	debugThrottledf("captcha-error",
+		"[STREAM %d] [Captcha][debug] code=%d msg=%q captcha_sid=%q captcha_img=%t redirect=%s session_token=%s (len=%d)",
+		streamID, c.ErrorCode, c.ErrorMsg, c.CaptchaSid, c.CaptchaImg != "",
+		redirectBase, tokenPreview, len(c.SessionToken))
+}
+
 type captchaSolveMode int
 
 const (
@@ -1160,6 +1212,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
 			captchaErr := ParseVkCaptchaError(errObj)
 			if captchaErr != nil && captchaErr.IsCaptchaError() {
+				debugCaptchaError(streamID, captchaErr)
 				solveMode, hasSolveMode := captchaSolveModeForAttempt(attempt, manualCaptcha, autoCaptchaSliderPOC)
 				if !hasSolveMode {
 					log.Printf("[STREAM %d] [Captcha] No more solve modes available (attempt %d)", streamID, attempt+1)
@@ -1174,6 +1227,10 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 					return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED")
 				}
+
+				debugThrottledf("captcha-mode",
+					"[STREAM %d] [Captcha][debug] attempt=%d solving via %s",
+					streamID, attempt+1, captchaSolveModeLabel(solveMode))
 
 				var successToken string
 				var captchaKey string
@@ -1285,6 +1342,14 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 						link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaErr.CaptchaAttempt, token1)
 				}
 				continue
+			}
+			// error_code:14 that did not pass IsCaptchaError means VK changed the
+			// challenge shape again — surface the raw map under -debug so the next
+			// breakage is diagnosable without a code change.
+			if code, _ := errObj["error_code"].(float64); int(code) == 14 {
+				debugThrottledf("captcha-unrecognized",
+					"[STREAM %d] [Captcha][debug] error_code:14 not recognized as solvable captcha, raw=%v",
+					streamID, errObj)
 			}
 			return "", "", nil, fmt.Errorf("VK API error: %v", errObj)
 		}
