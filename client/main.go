@@ -870,7 +870,11 @@ const (
 	recentFailWindow = 3 * time.Minute
 )
 
-var streamsPerCache = 10
+// streamsPerCache controls how many TURN streams share one VK credential set.
+// Default 1 gives each stream its own VK session and TURN username, which
+// provides independent bandwidth allocations on VK's TURN relays. Higher
+// values reduce VK API calls (faster startup) but share bandwidth.
+var streamsPerCache = 1
 
 func getCacheID(streamID int) int {
 	return streamID / streamsPerCache
@@ -2460,6 +2464,17 @@ func main() {
 	}
 	if idx := strings.IndexAny(link, "/?#"); idx != -1 {
 		link = link[:idx]
+	}
+
+	if *vklink != "" {
+		numCaches := (*n + streamsPerCache - 1) / streamsPerCache
+		estSec := numCaches * 15
+		if numCaches > 1 {
+			log.Printf("[VK Auth] streams-per-cred=%d: will fetch %d independent VK credential sets (~%ds startup). Use -streams-per-cred %d to share one set (faster startup, shared TURN bandwidth).",
+				streamsPerCache, numCaches, estSec, *n)
+		} else {
+			log.Printf("[VK Auth] streams-per-cred=%d: all %d streams share one VK credential set (fast startup, shared TURN bandwidth). Use -streams-per-cred 1 for maximum bandwidth.", streamsPerCache, *n)
+		}
 	}
 
 	params := &turnParams{
