@@ -848,10 +848,11 @@ type TurnCredentials struct {
 }
 
 type StreamCredentialsCache struct {
-	creds         TurnCredentials
-	mutex         sync.RWMutex
-	errorCount    atomic.Int32
-	lastErrorTime atomic.Int64
+	creds             TurnCredentials
+	mutex             sync.RWMutex
+	errorCount        atomic.Int32
+	lastErrorTime     atomic.Int64
+	lastForcedRefetch atomic.Int64
 }
 
 const (
@@ -860,6 +861,13 @@ const (
 	maxCacheErrors     = 3
 	errorWindow        = 10 * time.Second
 	turnServerCooldown = 30 * time.Second
+	// forcedRefetchBackoff is the minimum gap between two credential refetches
+	// forced because every TURN relay in a cache is on cooldown. It keeps the
+	// "all relays dead" recovery from hammering VK (and tripping captcha lockout).
+	forcedRefetchBackoff = 30 * time.Second
+	// recentFailWindow is how long a relay address is remembered as "recently
+	// failed" so a fresh VK fetch can prefer different IPs over it.
+	recentFailWindow = 3 * time.Minute
 )
 
 var streamsPerCache = 10
@@ -880,8 +888,10 @@ var credentialsStore = struct {
 	caches: make(map[int]*StreamCredentialsCache),
 }
 
-var streamServerOffsets sync.Map // map[int]*atomic.Uint64
-var turnServerCooldowns sync.Map // map[string]*atomic.Int64
+var streamServerOffsets sync.Map   // map[int]*atomic.Uint64
+var turnServerCooldowns sync.Map   // map[string]*atomic.Int64
+var streamCurrentServer sync.Map   // map[int]string  (relay addr a stream last used)
+var recentlyFailedServers sync.Map // map[string]int64 (unix-nano expiry)
 
 func streamServerOffset(streamID int) *atomic.Uint64 {
 	v, _ := streamServerOffsets.LoadOrStore(streamID, &atomic.Uint64{})
@@ -935,6 +945,93 @@ func isTURNServerAvailable(addr string) bool {
 		panic(fmt.Sprintf("unexpected turnServerCooldowns value type: %T", v))
 	}
 	return time.Now().UnixNano() >= until.Load()
+}
+
+// setStreamCurrentServer records the relay address a stream is currently using so
+// that a failure detected in a different goroutine (e.g. the DTLS handshake loop)
+// can blame the correct relay. The address must be the value returned by getCreds
+// (i.e. a ServerAddrs entry), so cooldown keys match isTURNServerAvailable.
+func setStreamCurrentServer(streamID int, addr string) {
+	streamCurrentServer.Store(streamID, addr)
+}
+
+func getStreamCurrentServer(streamID int) (string, bool) {
+	v, ok := streamCurrentServer.Load(streamID)
+	if !ok {
+		return "", false
+	}
+	addr, ok := v.(string)
+	return addr, ok
+}
+
+// markServerFailed puts a relay on cooldown and remembers it as recently failed so
+// a subsequent fresh VK fetch can prefer different IPs. Safe to call with "".
+func markServerFailed(addr string) {
+	if addr == "" {
+		return
+	}
+	markTURNServerCooldown(addr)
+	recentlyFailedServers.Store(addr, time.Now().Add(recentFailWindow).UnixNano())
+}
+
+// isRecentlyFailed reports whether a relay failed within recentFailWindow.
+func isRecentlyFailed(addr string) bool {
+	v, ok := recentlyFailedServers.Load(addr)
+	if !ok {
+		return false
+	}
+	expiry, ok := v.(int64)
+	if !ok {
+		return false
+	}
+	if time.Now().UnixNano() >= expiry {
+		recentlyFailedServers.Delete(addr)
+		return false
+	}
+	return true
+}
+
+// coolDownAndRotate blames the stream's current relay (cooldown + recently-failed)
+// and advances the stream's server offset so the next pickStreamServerAddr lands on
+// a different relay. Returns the blamed address (may be "").
+func coolDownAndRotate(streamID int) string {
+	addr, ok := getStreamCurrentServer(streamID)
+	if ok && addr != "" {
+		markServerFailed(addr)
+	}
+	rotateStreamServer(streamID)
+	return addr
+}
+
+// allServersCooling reports whether every relay in the list is currently on
+// cooldown — the signal that the cached credential's whole pool is dead and a
+// fresh VK fetch is warranted.
+func allServersCooling(addrs []string) bool {
+	if len(addrs) == 0 {
+		return false
+	}
+	for _, addr := range addrs {
+		if isTURNServerAvailable(addr) {
+			return false
+		}
+	}
+	return true
+}
+
+// orderAddrsByFreshness returns addrs reordered so relays that did NOT recently
+// fail come first, preserving relative order within each group. Used to bias a
+// fresh VK credential set toward IPs different from the ones that just failed.
+func orderAddrsByFreshness(addrs []string) []string {
+	fresh := make([]string, 0, len(addrs))
+	stale := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if isRecentlyFailed(addr) {
+			stale = append(stale, addr)
+		} else {
+			fresh = append(fresh, addr)
+		}
+	}
+	return append(fresh, stale...)
 }
 
 func getStreamCache(streamID int) *StreamCredentialsCache {
@@ -1006,12 +1103,45 @@ func (c *StreamCredentialsCache) invalidate(streamID int) {
 	log.Printf("[STREAM %d] [VK Auth] Credentials cache invalidated", streamID)
 }
 
+func (c *StreamCredentialsCache) credsUsable(link string) bool {
+	return c.creds.Link == link && time.Now().Before(c.creds.ExpiresAt) && len(c.creds.ServerAddrs) > 0
+}
+
+// shouldForceRefetch reports whether otherwise-valid cached credentials should be
+// discarded and re-fetched because every relay in the pool is on cooldown. It is
+// rate-limited by forcedRefetchBackoff and suppressed during a captcha lockout so
+// the "all relays dead" recovery never hammers VK.
+func (c *StreamCredentialsCache) shouldForceRefetch(addrs []string) bool {
+	if !allServersCooling(addrs) {
+		return false
+	}
+	if time.Now().Unix() < globalCaptchaLockout.Load() {
+		return false
+	}
+	last := c.lastForcedRefetch.Load()
+	return last == 0 || time.Since(time.Unix(0, last)) >= forcedRefetchBackoff
+}
+
+// allRecentlyFailed reports whether every relay in the list failed within
+// recentFailWindow — i.e. VK handed back the same dead pool.
+func allRecentlyFailed(addrs []string) bool {
+	if len(addrs) == 0 {
+		return false
+	}
+	for _, addr := range addrs {
+		if !isRecentlyFailed(addr) {
+			return false
+		}
+	}
+	return true
+}
+
 func getVkCredsCached(ctx context.Context, link string, streamID int, dialer *dnsdialer.Dialer) (string, string, string, error) {
 	cache := getStreamCache(streamID)
 	cacheID := getCacheID(streamID)
 
 	cache.mutex.RLock()
-	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
+	if cache.credsUsable(link) && !cache.shouldForceRefetch(cache.creds.ServerAddrs) {
 		expires := time.Until(cache.creds.ExpiresAt)
 		u, p := cache.creds.Username, cache.creds.Password
 		addr := pickStreamServerAddr(streamID, cache.creds.ServerAddrs)
@@ -1027,9 +1157,17 @@ func getVkCredsCached(ctx context.Context, link string, streamID int, dialer *dn
 	defer cache.mutex.Unlock()
 
 	// Double-check inside lock
-	if cache.creds.Link == link && time.Now().Before(cache.creds.ExpiresAt) && len(cache.creds.ServerAddrs) > 0 {
+	if cache.credsUsable(link) && !cache.shouldForceRefetch(cache.creds.ServerAddrs) {
 		addr := pickStreamServerAddr(streamID, cache.creds.ServerAddrs)
 		return cache.creds.Username, cache.creds.Password, addr, nil
+	}
+
+	if cache.credsUsable(link) {
+		// Refetching because the whole relay pool is on cooldown. Stamp the time
+		// up-front so concurrent callers honour the backoff.
+		cache.lastForcedRefetch.Store(time.Now().UnixNano())
+		debugThrottledf("turn-refetch",
+			"[STREAM %d] [VK Auth] all relays on cooldown, requesting fresh credentials", streamID)
 	}
 
 	user, pass, addrs, err := fetchVkCredsSerialized(ctx, link, streamID, dialer)
@@ -1037,6 +1175,18 @@ func getVkCredsCached(ctx context.Context, link string, streamID int, dialer *dn
 		return "", "", "", err
 	}
 
+	// If VK handed back the exact same recently-failed pool, try once more to get
+	// different IPs (conservative: a single extra attempt, still serialized/throttled).
+	if allRecentlyFailed(addrs) {
+		debugThrottledf("turn-refetch-retry",
+			"[STREAM %d] [VK Auth] fresh creds returned only recently-failed relays, retrying once", streamID)
+		if u2, p2, a2, err2 := fetchVkCredsSerialized(ctx, link, streamID, dialer); err2 == nil && !allRecentlyFailed(a2) {
+			user, pass, addrs = u2, p2, a2
+		}
+	}
+
+	// Prefer relays that did not just fail.
+	addrs = orderAddrsByFreshness(addrs)
 	cache.creds = TurnCredentials{Username: user, Password: pass, ServerAddrs: addrs, ExpiresAt: time.Now().Add(credentialLifetime - cacheSafetyMargin), Link: link}
 	addr := pickStreamServerAddr(streamID, addrs)
 	return user, pass, addr, nil
@@ -1884,6 +2034,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		err = fmt.Errorf("failed to get TURN credentials: %s", err1)
 		return
 	}
+	// Remember which relay this stream is on so the DTLS handshake loop (a separate
+	// goroutine) can blame the right relay if the path times out.
+	setStreamCurrentServer(streamID, urlTarget)
 	urlhost, urlport, err1 := net.SplitHostPort(urlTarget)
 	if err1 != nil {
 		err = fmt.Errorf("failed to parse TURN server address: %s", err1)
@@ -1963,6 +2116,9 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 
 	err1 = client.Listen()
 	if err1 != nil {
+		// Relay-level failure: cool down this relay and rotate so the next attempt
+		// lands on a different one.
+		coolDownAndRotate(streamID)
 		err = fmt.Errorf("failed to listen: %s", err1)
 		return
 	}
@@ -1972,6 +2128,7 @@ func oneTurnConnection(ctx context.Context, turnParams *turnParams, peer *net.UD
 		if isAuthError(err1) {
 			handleAuthError(streamID)
 		}
+		coolDownAndRotate(streamID)
 		err = fmt.Errorf("failed to allocate: %s", err1)
 		return
 	}
@@ -2093,6 +2250,13 @@ func oneDtlsConnectionLoop(ctx context.Context, peer *net.UDPAddr, listenConn ne
 		default:
 			err := oneDtlsConnection(ctx, peer, listenConn, inboundChan, connchan, okchan, streamID)
 			if err != nil {
+				// A DTLS failure means the relay path is bad (the relay times out or
+				// drops packets). Blame the current relay and rotate so the paired
+				// TURN goroutine's next getCreds lands on a different one.
+				if blamed := coolDownAndRotate(streamID); blamed != "" {
+					debugThrottledf("turn-rotate",
+						"[STREAM %d] [TURN] relay %s failed DTLS, cooling down and rotating", streamID, blamed)
+				}
 				if time.Now().Unix() < globalCaptchaLockout.Load() && strings.Contains(err.Error(), "context deadline exceeded") {
 					continue
 				}

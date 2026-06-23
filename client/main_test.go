@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCaptchaSolveModeForAttempt(t *testing.T) {
@@ -142,5 +143,73 @@ func TestDebugThrottledfSuppressesRepeats(t *testing.T) {
 
 	if got := strings.Count(buf.String(), "tick "); got != 1 {
 		t.Fatalf("expected throttle to emit exactly once within interval, got %d lines: %q", got, buf.String())
+	}
+}
+
+func TestAllServersCooling(t *testing.T) {
+	a := "test-cool-a:19302"
+	b := "test-cool-b:19302"
+
+	if allServersCooling([]string{a, b}) {
+		t.Fatal("expected not-all-cooling when no relay is on cooldown")
+	}
+	markTURNServerCooldown(a)
+	if allServersCooling([]string{a, b}) {
+		t.Fatal("expected not-all-cooling while one relay is still available")
+	}
+	markTURNServerCooldown(b)
+	if !allServersCooling([]string{a, b}) {
+		t.Fatal("expected all-cooling once every relay is on cooldown")
+	}
+	if allServersCooling(nil) {
+		t.Fatal("empty list must not count as all-cooling")
+	}
+}
+
+func TestOrderAddrsByFreshness(t *testing.T) {
+	fresh := "test-fresh-ok:19302"
+	stale := "test-fresh-bad:19302"
+
+	markServerFailed(stale) // records cooldown + recently-failed
+
+	got := orderAddrsByFreshness([]string{stale, fresh})
+	if len(got) != 2 || got[0] != fresh || got[1] != stale {
+		t.Fatalf("expected fresh relay first, got %v", got)
+	}
+}
+
+func TestRotateStreamServerChangesPick(t *testing.T) {
+	// A high streamID unlikely to collide with other tests' offsets.
+	streamID := 100003
+	addrs := []string{"test-rot-a:19302", "test-rot-b:19302"}
+
+	first := pickStreamServerAddr(streamID, addrs)
+	rotateStreamServer(streamID)
+	second := pickStreamServerAddr(streamID, addrs)
+
+	if first == second {
+		t.Fatalf("expected rotation to pick a different relay, both were %q", first)
+	}
+}
+
+func TestShouldForceRefetchBackoff(t *testing.T) {
+	cache := &StreamCredentialsCache{}
+	a := "test-refetch-a:19302"
+	b := "test-refetch-b:19302"
+	addrs := []string{a, b}
+
+	if cache.shouldForceRefetch(addrs) {
+		t.Fatal("must not force refetch while relays are available")
+	}
+
+	markTURNServerCooldown(a)
+	markTURNServerCooldown(b)
+	if !cache.shouldForceRefetch(addrs) {
+		t.Fatal("expected forced refetch when all relays cool and none done before")
+	}
+
+	cache.lastForcedRefetch.Store(time.Now().UnixNano())
+	if cache.shouldForceRefetch(addrs) {
+		t.Fatal("expected backoff to suppress an immediate second forced refetch")
 	}
 }
