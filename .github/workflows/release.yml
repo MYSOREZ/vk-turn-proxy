@@ -13,9 +13,29 @@ jobs:
   build:
     name: Build binaries
     runs-on: ubuntu-latest
-    strategy:
+      # Fail-fast disabled so a single arch failure does not cancel the
+      # priority android/arm64 build or the other targets.
+      fail-fast: false
       matrix:
         include:
+          # Android first — arm64 is the primary/priority target, then the
+          # remaining Android ABIs (arm, x86, x86_64).
+          - goos: android
+            goarch: arm64
+            cgo: 1
+            api: 21
+          - goos: android
+            goarch: arm
+            cgo: 1
+            api: 21
+          - goos: android
+            goarch: 386
+            cgo: 1
+            api: 21
+          - goos: android
+            goarch: amd64
+            cgo: 1
+            api: 21
           - goos: linux
             goarch: amd64
             cgo: 0
@@ -59,14 +79,6 @@ jobs:
           - goos: windows
             goarch: 386
             cgo: 0
-          - goos: android
-            goarch: arm64
-            cgo: 1
-            api: 21
-          - goos: android
-            goarch: arm
-            cgo: 1
-            api: 21
           - goos: freebsd
             goarch: amd64
             cgo: 0
@@ -110,14 +122,24 @@ jobs:
 
             TOOLCHAIN_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-            if [ "$GOARCH" = "arm64" ]; then
-              export CC="$TOOLCHAIN_BIN/aarch64-linux-android${ANDROID_API}-clang"
-            elif [ "$GOARCH" = "arm" ]; then
-              export CC="$TOOLCHAIN_BIN/armv7a-linux-androideabi${ANDROID_API}-clang"
-            else
-              echo "Unsupported ANDROID GOARCH=$GOARCH"
-              exit 1
-            fi
+            case "$GOARCH" in
+              arm64)
+                export CC="$TOOLCHAIN_BIN/aarch64-linux-android${ANDROID_API}-clang"
+                ;;
+              arm)
+                export CC="$TOOLCHAIN_BIN/armv7a-linux-androideabi${ANDROID_API}-clang"
+                ;;
+              386)
+                export CC="$TOOLCHAIN_BIN/i686-linux-android${ANDROID_API}-clang"
+                ;;
+              amd64)
+                export CC="$TOOLCHAIN_BIN/x86_64-linux-android${ANDROID_API}-clang"
+                ;;
+              *)
+                echo "Unsupported ANDROID GOARCH=$GOARCH"
+                exit 1
+                ;;
+            esac
 
             echo "Using Android NDK CC=$CC"
           fi
