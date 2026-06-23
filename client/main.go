@@ -2205,6 +2205,7 @@ func main() {
 	yalink := flag.String("yandex-link", "", "Yandex telemost invite link \"https://telemost.yandex.ru/j/...\"")
 	peerAddr := flag.String("peer", "", "peer server address (host:port)")
 	n := flag.Int("n", 0, "connections to TURN (default 10 for VK, 1 for Yandex)")
+	mult := flag.Int("mult", 1, "stream multiplier applied to -n")
 	udp := flag.Bool("udp", false, "connect to TURN with UDP")
 	direct := flag.Bool("no-dtls", false, "connect without obfuscation. DO NOT USE")
 	vlessMode := flag.Bool("vless", false, "VLESS mode: forward TCP connections (for VLESS) instead of UDP packets")
@@ -2285,6 +2286,13 @@ func main() {
 		if *n <= 0 {
 			*n = 1
 		}
+	}
+	if *mult < 1 {
+		log.Panicf("-mult must be at least 1")
+	}
+	if *mult > 1 {
+		*n *= *mult
+		log.Printf("Total streams after multiplier: %d (x%d)", *n, *mult)
 	}
 	if idx := strings.IndexAny(link, "/?#"); idx != -1 {
 		link = link[:idx]
