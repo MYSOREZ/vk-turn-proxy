@@ -225,7 +225,7 @@ jobs:
             BUMP="minor"
             MINOR=$((MINOR + 1))
             PATCH=0
-          elif printf '%s\n' "$COMMITS" | grep -Eiq '^fix([(:! ]|$)'; then
+          elif printf '%s\n' "$COMMITS" | grep -Eiq '^(fix|perf|refactor)([(:! ]|$)'; then
             BUMP="patch"
             PATCH=$((PATCH + 1))
           fi
@@ -253,11 +253,11 @@ jobs:
           RANGE: ${{ steps.meta.outputs.range }}
         run: |
           strip_prefix() {
-            sed -E 's/^(feat|fix|break)([(!:]|[[:space:]])+[[:space:]]*//I'
+            sed -E 's/^(feat|fix|perf|refactor|break)([(!:]|[[:space:]])+[[:space:]]*//I'
           }
 
           FEATURES="$(git log --no-merges --format='%s (%h)' "$RANGE" | grep -Ei '^feat([(:! ]|$)' | strip_prefix | LC_ALL=C sort -f || true)"
-          FIXES="$(git log --no-merges --format='%s (%h)' "$RANGE" | grep -Ei '^fix([(:! ]|$)' | strip_prefix | LC_ALL=C sort -f || true)"
+          FIXES="$(git log --no-merges --format='%s (%h)' "$RANGE" | grep -Ei '^(fix|perf|refactor)([(:! ]|$)' | strip_prefix | LC_ALL=C sort -f || true)"
           BREAKING="$(git log --no-merges --format='%s (%h)' "$RANGE" | grep -Ei '^break([(:! ]|$)' | strip_prefix | LC_ALL=C sort -f || true)"
 
           {
