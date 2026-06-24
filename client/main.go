@@ -1905,7 +1905,7 @@ func dtlsFunc(ctx context.Context, conn net.PacketConn, peer *net.UDPAddr) (net.
 		return nil, ctx.Err()
 	}
 
-	ctx1, cancel := context.WithTimeout(ctx, 20*time.Second)
+	ctx1, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	dtlsConn, err := dtls.ClientWithOptions(
 		conn,
@@ -2552,25 +2552,7 @@ func main() {
 		log.Panicf("Direct mode not supported with dispatcher")
 	}
 
-	okchan := make(chan struct{})
-	connchan := make(chan net.PacketConn)
-	wg1.Add(1)
-	go func() {
-		defer wg1.Done()
-		oneDtlsConnectionLoop(ctx, peer, listenConn, inboundChan, connchan, okchan, 0)
-	}()
-	wg1.Add(1)
-	go func() {
-		defer wg1.Done()
-		oneTurnConnectionLoop(ctx, params, peer, connchan, t, 0)
-	}()
-
-	select {
-	case <-okchan:
-	case <-ctx.Done():
-	}
-
-	for i := 1; i < numStreams; i++ {
+	for i := 0; i < numStreams; i++ {
 		cchan := make(chan net.PacketConn)
 		wg1.Add(1)
 		go func(streamID int) {
