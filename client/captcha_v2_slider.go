@@ -59,7 +59,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 	if err != nil {
 		return "", err
 	}
-	log.Printf("v2 slider puzzle decoded: grid=%d attempts=%d swaps=%d", puzzle.Size, puzzle.Attempts, len(puzzle.Swaps))
+	log.Printf("[КАПЧА] v2 slider puzzle decoded: grid=%d attempts=%d swaps=%d", puzzle.Size, puzzle.Attempts, len(puzzle.Swaps))
 
 	guesses, err := rankSliderGuessesV2(puzzle.Image, puzzle.Size, puzzle.Swaps)
 	if err != nil {
@@ -73,7 +73,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 	if limit <= 0 {
 		return "", errors.New("slider has no attempts available")
 	}
-	log.Printf("v2 slider guesses ranked: total=%d limit=%d", len(guesses), limit)
+	log.Printf("[КАПЧА] v2 slider guesses ranked: total=%d limit=%d", len(guesses), limit)
 
 	deviceJSON := captchaV2DeviceInfo
 	if s.savedProfile != nil && strings.TrimSpace(s.savedProfile.DeviceJSON) != "" {
@@ -91,7 +91,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 	}
 
 	for i := 0; i < limit; i++ {
-		log.Printf("v2 slider attempt %d/%d (guess #%d)", i+1, limit, guesses[i].Index)
+		log.Printf("[КАПЧА] v2 slider attempt %d/%d (guess #%d)", i+1, limit, guesses[i].Index)
 		answerData, err := json.Marshal(struct {
 			Value []int `json:"value"`
 		}{Value: guesses[i].Swaps})
@@ -113,7 +113,7 @@ func (s *captchaV2Session) solveSliderCaptcha(
 			if check.SuccessToken == "" {
 				return "", errors.New("captcha success token not found")
 			}
-			log.Printf("v2 slider accepted on attempt %d", i+1)
+			log.Printf("[КАПЧА] v2 slider accepted on attempt %d", i+1)
 			return check.SuccessToken, nil
 		}
 		if strings.EqualFold(check.Status, "error_limit") {
@@ -185,7 +185,7 @@ func splitSliderStepsV2(steps []int) (int, []int, int, error) {
 	if len(tail)%2 != 0 {
 		attempts = tail[len(tail)-1]
 		tail = tail[:len(tail)-1]
-		log.Printf("v2 slider payload had odd-length tail; fallback attempts=%d", attempts)
+		log.Printf("[КАПЧА] v2 slider payload had odd-length tail; fallback attempts=%d", attempts)
 	}
 	if attempts <= 0 {
 		attempts = 4
@@ -371,6 +371,35 @@ func applySliderSwapsV2(gridSize int, swaps []int) ([]int, error) {
 		mapping[left], mapping[right] = mapping[right], mapping[left]
 	}
 	return mapping, nil
+}
+
+func sliderTileRect(bounds image.Rectangle, gridSize int, index int) image.Rectangle {
+	col := index % gridSize
+	row := index / gridSize
+	return image.Rect(
+		bounds.Min.X+(col*bounds.Dx())/gridSize,
+		bounds.Min.Y+(row*bounds.Dy())/gridSize,
+		bounds.Min.X+((col+1)*bounds.Dx())/gridSize,
+		bounds.Min.Y+((row+1)*bounds.Dy())/gridSize,
+	)
+}
+
+func pixelDiff(a, b color.Color) int64 {
+	ar, ag, ab, _ := a.RGBA()
+	br, bg, bb, _ := b.RGBA()
+	dr := int64(ar>>8) - int64(br>>8)
+	dg := int64(ag>>8) - int64(bg>>8)
+	db := int64(ab>>8) - int64(bb>>8)
+	if dr < 0 {
+		dr = -dr
+	}
+	if dg < 0 {
+		dg = -dg
+	}
+	if db < 0 {
+		db = -db
+	}
+	return dr + dg + db
 }
 
 func seamScoreLumaV2(img image.Image, gridSize int, mapping []int) int64 {
