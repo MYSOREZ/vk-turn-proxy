@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -36,21 +35,11 @@ func main() {
 	connect := flag.String("connect", "", "connect to ip:port")
 	vlessMode := flag.Bool("vless", false, "VLESS mode: forward TCP connections (for VLESS) instead of UDP packets")
 	vlessBond := flag.Bool("vless-bond", false, "bond one VLESS TCP connection across all active smux sessions")
-	wrapMode := flag.Bool("wrap", false, "WRAP mode: ChaCha20-XOR obfuscate DTLS packets before they reach TURN ChannelData")
-	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex-encoded shared key for -wrap (64 hex chars)")
-	genWrapKey := flag.Bool("gen-wrap-key", false, "print a fresh 64-character hex key for -wrap-key and exit")
+	wrapMode := flag.Bool("wrap", false, "WRAP mode: RTP-AEAD obfuscate DTLS packets (matches client -password)")
+	password := flag.String("password", "", "shared password for -wrap (HKDF derives 32-byte key)")
 	debugFlag := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 	isDebug = *debugFlag
-
-	if *genWrapKey {
-		key := make([]byte, wrapKeyLen)
-		if _, err := rand.Read(key); err != nil {
-			log.Panicf("gen-wrap-key: rand.Read: %v", err)
-		}
-		fmt.Println(hex.EncodeToString(key))
-		return
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -73,15 +62,12 @@ func main() {
 	}
 	var wrapKey []byte
 	if *wrapMode {
-		if *wrapKeyHex == "" {
-			log.Panicf("-wrap requires -wrap-key")
+		if *password == "" {
+			log.Panicf("-wrap requires -password")
 		}
-		wrapKey, err = hex.DecodeString(*wrapKeyHex)
+		wrapKey, err = deriveWrapKey(*password)
 		if err != nil {
-			log.Panicf("-wrap-key invalid hex: %v", err)
-		}
-		if len(wrapKey) != wrapKeyLen {
-			log.Panicf("-wrap-key must decode to %d bytes (got %d)", wrapKeyLen, len(wrapKey))
+			log.Panicf("-wrap password derive: %v", err)
 		}
 	}
 	log.Printf("Starting server listen=%s connect=%s vless=%t vless-bond=%t wrap=%t bond-autodetect=true", *listen, *connect, *vlessMode, *vlessBond, *wrapMode)
@@ -103,7 +89,7 @@ func main() {
 	}
 	var listener net.Listener
 	if *wrapMode {
-		log.Printf("WRAP mode enabled: listener only accepts clients with matching -wrap-key")
+		log.Printf("WRAP mode enabled: RTP-AEAD obfuscation (password HKDF)")
 		wrapListener, werr := listenWrapped(addr, wrapKey)
 		if werr != nil {
 			panic(werr)
@@ -713,8 +699,40 @@ func (c *prefixedConn) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
+// handleClientProtocol reads the first post-handshake message from the client.
+// New clients send GETCONF or AUTH; old WireGuard clients send raw packets.
+func handleClientProtocol(conn net.Conn) (net.Conn, error) {
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, fmt.Errorf("protocol read: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	msg := string(buf[:n])
+	if strings.HasPrefix(msg, "GETCONF:") {
+		if _, werr := conn.Write([]byte("NOCONF")); werr != nil {
+			return nil, fmt.Errorf("protocol NOCONF write: %w", werr)
+		}
+		return conn, nil
+	}
+	if strings.HasPrefix(msg, "AUTH:") {
+		return conn, nil
+	}
+	// Old client — include first packet in forwarding
+	return &prefixedConn{Conn: conn, prefix: buf[:n]}, nil
+}
+
 // handleUDPConnection forwards DTLS packets to a UDP backend (WireGuard).
 func handleUDPConnection(ctx context.Context, conn net.Conn, connectAddr string) {
+	processedConn, err := handleClientProtocol(conn)
+	if err != nil {
+		log.Printf("Protocol handshake from %s: %v", conn.RemoteAddr(), err)
+		return
+	}
+	conn = processedConn
 	serverConn, err := net.Dial("udp", connectAddr)
 	if err != nil {
 		log.Println(err)

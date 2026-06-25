@@ -3,21 +3,30 @@
 package main
 
 import (
-	"crypto/rand"
-	"errors"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
 	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	pionudp "github.com/pion/transport/v4/udp"
-	"golang.org/x/crypto/chacha20"
+	"golang.org/x/crypto/hkdf"
 )
 
-const (
-	wrapNonceLen = 12
-	wrapKeyLen   = 32
-)
+const wrapKeyLen = 32
+
+// maxObfsOverhead: 12 (RTP header) + 16 (AEAD tag) + 24 (max padding) + 1 (padLen) = 53
+const maxObfsOverhead = 53
+
+func deriveWrapKey(password string) ([]byte, error) {
+	key := make([]byte, wrapKeyLen)
+	r := hkdf.New(sha256.New, []byte(password), []byte("VK-TURN-WRAP-v1"), []byte("rtp-obfs/chacha20poly1305"))
+	if _, err := io.ReadFull(r, key); err != nil {
+		return nil, fmt.Errorf("wrap: hkdf: %w", err)
+	}
+	return key, nil
+}
 
 func listenWrapped(addr *net.UDPAddr, key []byte) (dtlsnet.PacketListener, error) {
 	if len(key) != wrapKeyLen {
@@ -43,49 +52,42 @@ func (l *wrapPacketListener) Accept() (net.PacketConn, net.Addr, error) {
 	if err != nil {
 		return pc, addr, err
 	}
-	return &wrapPacketConn{inner: pc, key: l.key}, addr, nil
+	return &wrapPacketConn{
+		inner:     pc,
+		key:       l.key,
+		obfsCfg:   NewObfsConfig(),
+		obfsState: NewObfsState(),
+	}, addr, nil
 }
 
 func (l *wrapPacketListener) Close() error   { return l.inner.Close() }
 func (l *wrapPacketListener) Addr() net.Addr { return l.inner.Addr() }
 
 type wrapPacketConn struct {
-	inner net.PacketConn
-	key   []byte
+	inner     net.PacketConn
+	key       []byte
+	obfsCfg   *ObfsConfig
+	obfsState *ObfsState
 }
 
 func (c *wrapPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	buf := make([]byte, len(p)+wrapNonceLen)
+	buf := make([]byte, len(p)+maxObfsOverhead)
 	n, addr, err := c.inner.ReadFrom(buf)
 	if err != nil {
 		return 0, addr, err
 	}
-	if n < wrapNonceLen {
-		return 0, addr, errors.New("wrap: short packet (no nonce)")
-	}
-	nonce := buf[:wrapNonceLen]
-	ciphertext := buf[wrapNonceLen:n]
-	if len(ciphertext) > len(p) {
-		return 0, addr, errors.New("wrap: read buffer too small")
-	}
-	cipher, err := chacha20.NewUnauthenticatedCipher(c.key, nonce)
+	plain, err := obfsUnwrapPacket(c.key, buf[:n], p)
 	if err != nil {
-		return 0, addr, fmt.Errorf("wrap: cipher init: %w", err)
+		return 0, addr, fmt.Errorf("wrap: unwrap: %w", err)
 	}
-	cipher.XORKeyStream(p[:len(ciphertext)], ciphertext)
-	return len(ciphertext), addr, nil
+	return plain, addr, nil
 }
 
 func (c *wrapPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	out := make([]byte, wrapNonceLen+len(p))
-	if _, err := rand.Read(out[:wrapNonceLen]); err != nil {
-		return 0, fmt.Errorf("wrap: nonce gen: %w", err)
-	}
-	cipher, err := chacha20.NewUnauthenticatedCipher(c.key, out[:wrapNonceLen])
+	out, err := obfsWrapPacket(c.key, p, c.obfsCfg, c.obfsState)
 	if err != nil {
-		return 0, fmt.Errorf("wrap: cipher init: %w", err)
+		return 0, fmt.Errorf("wrap: wrap: %w", err)
 	}
-	cipher.XORKeyStream(out[wrapNonceLen:], p)
 	if _, err := c.inner.WriteTo(out, addr); err != nil {
 		return 0, err
 	}

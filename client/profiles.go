@@ -6,17 +6,19 @@ import (
 	"os"
 )
 
+// Profile holds consistent browser fingerprint headers for TLS+HTTP requests.
 type Profile struct {
-	UserAgent       string
-	SecChUa         string
-	SecChUaMobile   string
-	SecChUaPlatform string
+	UserAgent       string `json:"user_agent"`
+	SecChUa         string `json:"sec_ch_ua"`
+	SecChUaMobile   string `json:"sec_ch_ua_mobile"`
+	SecChUaPlatform string `json:"sec_ch_ua_platform"`
 }
 
+// SavedProfile is a saved real browser profile loaded from disk.
 type SavedProfile struct {
 	Profile
-	DeviceJSON string
-	BrowserFp  string
+	DeviceJSON string `json:"device_json"`
+	BrowserFp  string `json:"browser_fp"`
 }
 
 const profileFile = "vk_profile.json"
