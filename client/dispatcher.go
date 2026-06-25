@@ -148,9 +148,7 @@ func (d *Dispatcher) readLoop() {
 		d.clientAddr.Store(&addr)
 		atomic.AddInt64(&d.stats.TotalBytesUp, int64(n))
 
-		if atomic.CompareAndSwapUint32(&d.firstPktUp, 0, 1) {
-			log.Printf("[ДИСП] [ДЕБАГ] Получен ПЕРВЫЙ пакет от локального WireGuard (%d байт) с адреса %s", n, addr.String())
-		}
+		atomic.CompareAndSwapUint32(&d.firstPktUp, 0, 1)
 
 		pkt := getPktBuf(n)
 		copy(pkt, buf[:n])
@@ -217,9 +215,7 @@ func (d *Dispatcher) writeLoop() {
 				continue
 			}
 			addr := *addrPtr
-			if atomic.CompareAndSwapUint32(&d.firstPktDown, 0, 1) {
-				log.Printf("[ДИСП] [ДЕБАГ] Отправляем ПЕРВЫЙ пакет обратно локальному WireGuard (%d байт) на адрес %s", len(pkt), addr.String())
-			}
+			atomic.CompareAndSwapUint32(&d.firstPktDown, 0, 1)
 			if _, err := d.localConn.WriteTo(pkt, addr); err != nil {
 				if d.ctx.Err() != nil {
 					putPktBuf(pkt)

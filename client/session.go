@@ -210,9 +210,7 @@ func RunSession(
 				}
 				payload = plain[:m]
 			}
-			if atomic.CompareAndSwapUint32(&firstWrapUp, 0, 1) {
-				log.Printf("[СЕССИЯ #%d] [ДЕБАГ] Первый пакет от TURN Relay (%d байт)", sessionID, len(payload))
-			}
+			atomic.CompareAndSwapUint32(&firstWrapUp, 0, 1)
 			if _, writeErr := pipeA.WriteTo(payload, peer); writeErr != nil {
 				return
 			}
@@ -240,9 +238,7 @@ func RunSession(
 					out = wrapped
 				}
 			}
-			if atomic.CompareAndSwapUint32(&firstWrapDown, 0, 1) {
-				log.Printf("[СЕССИЯ #%d] [ДЕБАГ] Первый пакет на TURN Relay (%d байт)", sessionID, len(out))
-			}
+			atomic.CompareAndSwapUint32(&firstWrapDown, 0, 1)
 			if _, writeErr := relay.WriteTo(out, peer); writeErr != nil {
 				return
 			}
@@ -371,9 +367,7 @@ func RunSession(
 					return
 				}
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(sessionReadTimeout))
-				if atomic.CompareAndSwapUint32(&firstDtlsWrite, 0, 1) {
-					log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Первый пакет в DTLS (%d байт)", sessionID, len(pkt))
-				}
+				atomic.CompareAndSwapUint32(&firstDtlsWrite, 0, 1)
 				_, writeErr := dtlsConn.Write(pkt)
 				putPktBuf(pkt)
 				if writeErr != nil {
@@ -407,9 +401,7 @@ func RunSession(
 				continue
 			}
 
-			if atomic.CompareAndSwapUint32(&firstDtlsRead, 0, 1) {
-				log.Printf("[ВОРКЕР #%d] [ДЕБАГ] Первый пакет из DTLS (%d байт)", sessionID, n)
-			}
+			atomic.CompareAndSwapUint32(&firstDtlsRead, 0, 1)
 
 			pkt := getPktBuf(n)
 			copy(pkt, b[:n])
