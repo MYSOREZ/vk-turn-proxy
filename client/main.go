@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // CaptchaResultChan — канал для получения токена капчи из внешнего решателя (WebView)
@@ -120,6 +121,7 @@ func main() {
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
 	numW := flag.Int("n", 24, "количество воркеров (кратно 9)")
 	pingOnly := flag.Bool("ping-only", false, "запустить только замер задержки и выйти")
+	statsInterval := flag.Int("stats-interval", 30, "интервал статистики в секундах (0 = выключить)")
 
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
@@ -261,7 +263,9 @@ func main() {
 		<-ctx.Done()
 		close(shutdownCh)
 	}()
-	go stats.RunLoop(shutdownCh)
+	if *statsInterval > 0 {
+		go stats.RunLoop(shutdownCh, time.Duration(*statsInterval)*time.Second)
+	}
 
 	disp := NewDispatcher(ctx, localConn, stats)
 	defer disp.Shutdown()
