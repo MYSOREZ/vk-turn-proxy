@@ -63,6 +63,12 @@ linters:
       - linters:
           - unused
         source: "solveVkCaptchaV2|captchaV2MaxAttempts|obfsIsRTPPacket"
+      - linters:
+          - staticcheck
+        text: "(CaptchaTs|redirectUri|captchaTs|initTs) should be"
+      - linters:
+          - staticcheck
+        text: "this value of lastErr is never used"
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
