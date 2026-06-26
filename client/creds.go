@@ -213,10 +213,15 @@ var (
 )
 
 func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (string, string, []string, error) {
+	// okru-native не ходит через VK — throttle не нужен
+	if getVkAuthMode() == "okru-native" {
+		return fetchVkCreds(ctx, link, streamID)
+	}
+
 	vkRequestMu.Lock()
 	defer vkRequestMu.Unlock()
 
-	// Throttle: 3-6 seconds between requests
+	// Throttle: 3-6 seconds between requests to avoid VK rate limiting
 	minInterval := 3*time.Second + time.Duration(rand.Intn(3000))*time.Millisecond
 	elapsed := time.Since(globalLastVkFetchTime)
 
@@ -726,7 +731,7 @@ func solveCaptchaBySelectedMode(
 	lastErr = solveErr
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: финальная Go v2 ошибка: %v", streamID, solveErr)
 
-	log.Printf("[STREAM %d] [КАПЧА] AUTO: автоцепочка не прошла, открыт ручной WebView", streamID)
+	log.Printf("[STREAM %d] [КАПЧа] AUTO: автоцепочка не прошла, открыт ручной WebView", streamID)
 	token, solveErr = requestWebViewCaptcha(streamID, captchaErr, "manual", captchaManualWebViewTimeout)
 	if solveErr == nil {
 		log.Printf("[STREAM %d] [КАПЧА] AUTO: ручной WebView решил капчу", streamID)

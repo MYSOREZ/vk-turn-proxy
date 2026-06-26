@@ -152,8 +152,7 @@ func main() {
 
 	hashes := ParseHashes(*vkHash)
 	if activeVkAuthMode == "okru-native" && len(hashes) == 0 {
-		// okru-native doesn't need a VK link; use a single empty placeholder so
-		// the worker/group machinery runs with one credential slot.
+		// okru-native не требует VK-ссылки; один пустой слот для машинерии воркеров
 		hashes = []string{""}
 	} else if len(hashes) == 0 {
 		log.Fatal("[КЛИЕНТ] Нет хешей VK")
@@ -174,7 +173,7 @@ func main() {
 	if *numW > maxWorkers {
 		*numW = maxWorkers
 	}
-	if getVkAuthMode() == "account" {
+	if activeVkAuthMode == "account" {
 		const accountMaxWorkers = 4
 		if *numW > accountMaxWorkers {
 			log.Printf("[КЛИЕНТ] Аккаунт VK: TURN-квота ~%d relay на сессию, потоков %d -> %d", accountMaxWorkers, *numW, accountMaxWorkers)
@@ -214,7 +213,6 @@ func main() {
 			fmt.Printf("PING_RESULT|%d\n", rtt)
 			os.Exit(0)
 		}
-		// Если все хеши провалились
 		fmt.Printf("PING_ERROR|All hashes failed. Last error: %v\n", lastErr)
 		os.Exit(1)
 	}
@@ -243,14 +241,6 @@ func main() {
 		wrapStatus = "ON (password HKDF + RTP AEAD)"
 	}
 
-	captchaStatus := "AUTO: Go v2 x2 -> WBV Auto x2 -> Go v2 x1 -> Manual WBV"
-	switch activeCaptchaMode {
-	case "wv":
-		captchaStatus = "WBV selected in Android"
-	case "rjs":
-		captchaStatus = "RJS Go v2 with WBV Auto fallback"
-	}
-
 	authStatus := "VK anonymous (2 app_id, rotating)"
 	switch activeVkAuthMode {
 	case "account":
@@ -269,7 +259,16 @@ func main() {
 	log.Printf("[КЛИЕНТ] WRAP: %s", wrapStatus)
 	log.Printf("[WRAP] Ключ выведен из пароля, режим RTP AEAD активен")
 	log.Printf("[КЛИЕНТ] Device ID: %s", *deviceID)
-	log.Printf("[КЛИЕНТ] Captcha: %s", captchaStatus)
+	if activeVkAuthMode != "okru-native" {
+		captchaStatus := "AUTO: Go v2 x2 -> WBV Auto x2 -> Go v2 x1 -> Manual WBV"
+		switch activeCaptchaMode {
+		case "wv":
+			captchaStatus = "WBV selected in Android"
+		case "rjs":
+			captchaStatus = "RJS Go v2 with WBV Auto fallback"
+		}
+		log.Printf("[КЛИЕНТ] Captcha: %s", captchaStatus)
+	}
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
 
 	stats := NewStats()
