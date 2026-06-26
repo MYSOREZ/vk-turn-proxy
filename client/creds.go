@@ -404,10 +404,12 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	// APPLICATION scope: session_key/sig не нужны, только application_key в URL.
 	// Сессия, созданная здесь, валидна для последующих вызовов на api.ok.ru.
 	resp, err := doOKApiRequest("auth/anonymLogin", "", "", map[string]interface{}{
-		"version":        2,
-		"device_id":      uuid.New().String(),
-		"client_version": "android_8",
-		"client_type":    "SDK_ANDROID",
+		"session_data": map[string]interface{}{
+			"version":        2,
+			"device_id":      uuid.New().String(),
+			"client_version": "android_8",
+			"client_type":    "SDK_ANDROID",
+		},
 	})
 	if err != nil {
 		return "", "", nil, fmt.Errorf("auth.anonymLogin: %w", err)
