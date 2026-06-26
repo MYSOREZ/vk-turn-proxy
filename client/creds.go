@@ -335,13 +335,15 @@ func buildOKForm(params map[string]string, secretKey string) string {
 	return vals.Encode()
 }
 
-// ─── OK.ru native mode: anonymous session + vchat API, no VK required ───
+// ─── OK.ru native mode: anonymous session + vchat REST API, no VK required ───
 //
-// Flow (3 HTTP calls to calls.okcdn.ru, no VK credentials needed):
-//  1. auth.anonymLogin  → session_key + session_secret_key
-//  2. vchat.startConversation (signed with session_secret_key) → conversationId
-//  3. vchat.getConversationParams (signed) → TURN username/credential/urls
+// Flow:
+//  1. auth.anonymLogin (calls.okcdn.ru/fb.do, form-encoded) → session_key + session_secret_key
+//  2. vchat.startConversation (api.ok.ru/api/vchat/startConversation, JSON body, auth in URL) → conversationId
+//  3. vchat.getConversationParams (api.ok.ru/api/vchat/getConversationParams, JSON body) → TURN creds
 func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, string, []string, error) {
+	const okAppKey = "CHKIPMKGDIHBABABA"
+
 	profile := getRandomProfile()
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
@@ -353,7 +355,8 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 		return "", "", nil, fmt.Errorf("tls_client init: %w", err)
 	}
 
-	doOkRequest := func(data string) (map[string]interface{}, error) {
+	// doOKFormRequest: legacy form-encoded endpoint (auth.anonymLogin only)
+	doOKFormRequest := func(data string) (map[string]interface{}, error) {
 		req, err := fhttp.NewRequestWithContext(ctx, "POST", "https://calls.okcdn.ru/fb.do",
 			bytes.NewBuffer([]byte(data)))
 		if err != nil {
@@ -389,18 +392,70 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 		return resp, nil
 	}
 
-	// Step 1: auth.anonymLogin — create anonymous OK.ru session (no account needed).
-	// Parameters from OK Android SDK smali (AnonymLoginApiRequestV1):
-	// client_version must be "android_8" and client_type must be "SDK_ANDROID".
+	// doOKApiRequest: REST JSON endpoint (api.ok.ru), auth params + sig in URL query string.
+	// Sig is computed over URL params (application_key + session_key) sorted alphabetically.
+	doOKApiRequest := func(method string, sessionKey, secretKey string, bodyParams map[string]interface{}) (map[string]interface{}, error) {
+		urlAuthParams := map[string]string{
+			"application_key": okAppKey,
+			"session_key":     sessionKey,
+		}
+		sig := okSig(urlAuthParams, secretKey)
+		apiURL := fmt.Sprintf("https://api.ok.ru/api/%s?application_key=%s&session_key=%s&sig=%s",
+			method,
+			neturl.QueryEscape(okAppKey),
+			neturl.QueryEscape(sessionKey),
+			neturl.QueryEscape(sig),
+		)
+		jsonBody, marshalErr := json.Marshal(bodyParams)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("marshal json: %w", marshalErr)
+		}
+		req, reqErr := fhttp.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonBody))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Host = "api.ok.ru"
+		applyBrowserProfileFhttp(req, profile)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Origin", "https://ok.ru")
+		req.Header.Set("Referer", "https://ok.ru/")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+
+		httpResp, doErr := client.Do(req)
+		if doErr != nil {
+			return nil, doErr
+		}
+		defer func() {
+			if closeErr := httpResp.Body.Close(); closeErr != nil {
+				log.Printf("close response body: %s", closeErr)
+			}
+		}()
+		body, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			return nil, readErr
+		}
+		log.Printf("[STREAM %d] [OK Native] %s raw response: %.500s", streamID, method, string(body))
+		var resp map[string]interface{}
+		if parseErr := json.Unmarshal(body, &resp); parseErr != nil {
+			return nil, fmt.Errorf("json parse: %w (body: %.200s)", parseErr, string(body))
+		}
+		return resp, nil
+	}
+
+	// Step 1: auth.anonymLogin — create anonymous OK.ru session.
+	// Uses legacy form endpoint; parameters from AnonymLoginApiRequestV1 smali.
 	sessionData := fmt.Sprintf(
 		`{"version":2,"device_id":"%s","client_version":"android_8","client_type":"SDK_ANDROID"}`,
 		uuid.New().String(),
 	)
-	data := fmt.Sprintf(
-		"session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA",
-		neturl.QueryEscape(sessionData),
+	formData := fmt.Sprintf(
+		"session_data=%s&method=auth.anonymLogin&format=JSON&application_key=%s",
+		neturl.QueryEscape(sessionData), okAppKey,
 	)
-	resp, err := doOkRequest(data)
+	resp, err := doOKFormRequest(formData)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("auth.anonymLogin: %w", err)
 	}
@@ -414,54 +469,53 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 
 	vkDelayRandom(100, 200)
 
-	// Step 2: vchat.startConversation — create a new call room using a client-generated UUID.
-	// Requires session_key and conversationId; signed with session_secret_key if present.
+	// Step 2: vchat.startConversation — create a call room via REST JSON API.
+	// turnServers is required (string). Sig covers URL params only.
 	conversationID := uuid.New().String()
-	startParams := map[string]string{
-		"conversationId":  conversationID,
-		"isVideo":         "false",
-		"capabilities":    "2F7F",
-		"clientType":      "SDK_ANDROID",
-		"method":          "vchat.startConversation",
-		"format":          "JSON",
-		"application_key": "CGMMEJLGDIHBABABA",
-		"session_key":     sessionKey,
+	startResp, startErr := doOKApiRequest("vchat/startConversation", sessionKey, secretKey, map[string]interface{}{
+		"isVideo":                false,
+		"turnServers":            "",
+		"conversationId":         conversationID,
+		"createJoinLink":         false,
+		"waitForAdmin":           false,
+		"capabilities":           "2F7F",
+		"onlyAdminCanShareMovie": true,
+	})
+	if startErr != nil {
+		return "", "", nil, fmt.Errorf("vchat.startConversation: %w", startErr)
 	}
-	startData := buildOKForm(startParams, secretKey)
-	startResp, startErr := doOkRequest(startData)
-	if startErr == nil {
-		log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v", streamID, startResp)
-		if id, idOk := startResp["conversation_id"].(string); idOk && id != "" {
-			conversationID = id
-		} else if id, idOk := startResp["conversationId"].(string); idOk && id != "" {
-			conversationID = id
-		}
-		log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (using id=%s)", streamID, conversationID)
-	} else {
-		log.Printf("[STREAM %d] [OK Native] vchat.startConversation failed: %v", streamID, startErr)
+	log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v", streamID, startResp)
+	if id, idOk := startResp["conversation_id"].(string); idOk && id != "" {
+		conversationID = id
+	} else if id, idOk := startResp["conversationId"].(string); idOk && id != "" {
+		conversationID = id
+	}
+	log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (using id=%s)", streamID, conversationID)
+
+	// If startConversation already returned TURN creds, use them directly.
+	if tsRaw, hasTurn := startResp["turn_server"].(map[string]interface{}); hasTurn {
+		return extractOKTurnCreds(tsRaw, streamID)
 	}
 
 	vkDelayRandom(100, 150)
 
-	// Step 3: vchat.getConversationParams — fetch TURN credentials for the room.
-	getParams := map[string]string{
-		"conversationId":  conversationID,
-		"isOutgoing":      "true",
-		"method":          "vchat.getConversationParams",
-		"format":          "JSON",
-		"application_key": "CGMMEJLGDIHBABABA",
-		"session_key":     sessionKey,
+	// Step 3: vchat.getConversationParams — fetch TURN credentials.
+	getResp, getErr := doOKApiRequest("vchat/getConversationParams", sessionKey, secretKey, map[string]interface{}{
+		"conversationId": conversationID,
+	})
+	if getErr != nil {
+		return "", "", nil, fmt.Errorf("vchat.getConversationParams: %w", getErr)
 	}
-	data = buildOKForm(getParams, secretKey)
-	resp, err = doOkRequest(data)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("vchat.getConversationParams: %w", err)
-	}
+	log.Printf("[STREAM %d] [OK Native] vchat.getConversationParams resp: %v", streamID, getResp)
 
-	tsRaw, ok := resp["turn_server"].(map[string]interface{})
+	tsRaw, ok := getResp["turn_server"].(map[string]interface{})
 	if !ok {
-		return "", "", nil, fmt.Errorf("vchat.getConversationParams: missing turn_server (resp: %v)", resp)
+		return "", "", nil, fmt.Errorf("vchat.getConversationParams: missing turn_server (resp: %v)", getResp)
 	}
+	return extractOKTurnCreds(tsRaw, streamID)
+}
+
+func extractOKTurnCreds(tsRaw map[string]interface{}, streamID int) (string, string, []string, error) {
 	user, ok := tsRaw["username"].(string)
 	if !ok {
 		return "", "", nil, fmt.Errorf("turn_server: missing username")
@@ -482,8 +536,8 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 
 	var addresses []string
 	for _, u := range urlsRaw {
-		urlStr, ok := u.(string)
-		if !ok {
+		urlStr, uOk := u.(string)
+		if !uOk {
 			continue
 		}
 		addresses = append(addresses, turnURLsToAddresses([]string{urlStr})...)
@@ -491,7 +545,6 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	if len(addresses) == 0 {
 		return "", "", nil, fmt.Errorf("no valid TURN addresses parsed")
 	}
-
 	return user, pass, addresses, nil
 }
 
