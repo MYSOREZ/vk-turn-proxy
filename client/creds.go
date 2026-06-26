@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"math/rand"
 	"net"
 	neturl "net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -297,15 +299,48 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 	return "", "", nil, fmt.Errorf("all VK credentials failed: %w", lastErr)
 }
 
+// okSig computes the OK.ru API request signature:
+// MD5(sorted_key=value_pairs_concatenated + secretKey)
+// The sig parameter itself must NOT be included when computing.
+func okSig(params map[string]string, secretKey string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		if k == "sig" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.WriteString(k)
+		sb.WriteString("=")
+		sb.WriteString(params[k])
+	}
+	sb.WriteString(secretKey)
+	h := md5.Sum([]byte(sb.String()))
+	return fmt.Sprintf("%x", h)
+}
+
+// buildOKForm encodes a params map as application/x-www-form-urlencoded body.
+// If secretKey is non-empty, computes and appends the sig parameter.
+func buildOKForm(params map[string]string, secretKey string) string {
+	if secretKey != "" {
+		params["sig"] = okSig(params, secretKey)
+	}
+	vals := make(neturl.Values)
+	for k, v := range params {
+		vals.Set(k, v)
+	}
+	return vals.Encode()
+}
+
 // ─── OK.ru native mode: anonymous session + vchat API, no VK required ───
 //
 // Flow (3 HTTP calls to calls.okcdn.ru, no VK credentials needed):
-//  1. auth.anonymLogin  → session_key  (Android SDK params from OK.ru smali)
-//  2. vchat.startConversation → conversationId  (creates call room)
-//  3. vchat.getConversationParams → TURN username/credential/urls
-//
-// anonymToken is optional in vchat.getConversationParams (confirmed from
-// decompiled GetConversationParams$Request.java in OK Android SDK).
+//  1. auth.anonymLogin  → session_key + session_secret_key
+//  2. vchat.startConversation (signed with session_secret_key) → conversationId
+//  3. vchat.getConversationParams (signed) → TURN username/credential/urls
 func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, string, []string, error) {
 	profile := getRandomProfile()
 
@@ -373,18 +408,26 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	if !ok || sessionKey == "" {
 		return "", "", nil, fmt.Errorf("auth.anonymLogin: missing session_key (resp: %v)", resp)
 	}
-	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin OK", streamID)
+	secretKey, _ := resp["session_secret_key"].(string)
+	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin full resp: %v", streamID, resp)
+	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin OK — session_key len=%d has_secret=%v", streamID, len(sessionKey), secretKey != "")
 
 	vkDelayRandom(100, 200)
 
 	// Step 2: vchat.startConversation — create a new call room using a client-generated UUID.
-	// The server expects conversationId as an INPUT parameter (client-assigned ID).
+	// Requires session_key and conversationId; signed with session_secret_key if present.
 	conversationID := uuid.New().String()
-	startData := fmt.Sprintf(
-		"conversationId=%s&isVideo=false&capabilities=2F7F&clientType=SDK_ANDROID&method=vchat.startConversation&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
-		neturl.QueryEscape(conversationID),
-		sessionKey,
-	)
+	startParams := map[string]string{
+		"conversationId":  conversationID,
+		"isVideo":         "false",
+		"capabilities":    "2F7F",
+		"clientType":      "SDK_ANDROID",
+		"method":          "vchat.startConversation",
+		"format":          "JSON",
+		"application_key": "CGMMEJLGDIHBABABA",
+		"session_key":     sessionKey,
+	}
+	startData := buildOKForm(startParams, secretKey)
 	startResp, startErr := doOkRequest(startData)
 	if startErr == nil {
 		log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v", streamID, startResp)
@@ -401,12 +444,15 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	vkDelayRandom(100, 150)
 
 	// Step 3: vchat.getConversationParams — fetch TURN credentials for the room.
-	// anonymToken is intentionally omitted (it's optional per OK SDK source).
-	data = fmt.Sprintf(
-		"conversationId=%s&isOutgoing=true&method=vchat.getConversationParams&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
-		neturl.QueryEscape(conversationID),
-		sessionKey,
-	)
+	getParams := map[string]string{
+		"conversationId":  conversationID,
+		"isOutgoing":      "true",
+		"method":          "vchat.getConversationParams",
+		"format":          "JSON",
+		"application_key": "CGMMEJLGDIHBABABA",
+		"session_key":     sessionKey,
+	}
+	data = buildOKForm(getParams, secretKey)
 	resp, err = doOkRequest(data)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("vchat.getConversationParams: %w", err)
