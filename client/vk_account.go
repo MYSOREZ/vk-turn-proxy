@@ -48,7 +48,7 @@ var TurnCredsResultChan = make(chan turnCredsPayload, 1)
 
 func setVkAuthMode(mode string) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != "anonymous" {
+	if mode != "anonymous" && mode != "okru-native" {
 		mode = "account"
 	}
 	vkAuthModeValue.Store(mode)

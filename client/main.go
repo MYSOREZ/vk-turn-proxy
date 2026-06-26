@@ -117,7 +117,7 @@ func main() {
 	host := flag.String("turn", "", "переопределить IP TURN")
 	port := flag.String("port", "", "переопределить порт TURN")
 	listen := flag.String("listen", "127.0.0.1:9000", "локальный адрес")
-	vkHash := flag.String("vk", "", "хеши VK-звонков (через запятую)")
+	vkHash := flag.String("vk", "", "хеши VK-звонков (через запятую); не нужен при -vk-auth=okru-native")
 	peerAddr := flag.String("peer", "", "адрес:порт VPS сервера")
 	numW := flag.Int("n", 24, "количество воркеров (кратно 9)")
 	pingOnly := flag.Bool("ping-only", false, "запустить только замер задержки и выйти")
@@ -126,7 +126,7 @@ func main() {
 	deviceID := flag.String("device-id", "unknown", "уникальный ID устройства")
 	connPassword := flag.String("password", "", "пароль подключения")
 	captchaMode := flag.String("captcha-mode", "auto", "режим обхода капчи (auto/wv/rjs)")
-	vkAuthMode := flag.String("vk-auth", "anonymous", "режим VK авторизации (account/anonymous)")
+	vkAuthMode := flag.String("vk-auth", "anonymous", "режим авторизации (account/anonymous/okru-native)")
 	vkCredsFile := flag.String("vk-creds-file", "", "файл с TURN кредами от аккаунта VK")
 
 	flag.Parse()
@@ -138,8 +138,11 @@ func main() {
 	}
 	log.Printf("[КЛИЕНТ] VK auth mode: %s", activeVkAuthMode)
 
-	if *peerAddr == "" || *vkHash == "" {
-		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")
+	if *peerAddr == "" {
+		log.Fatal("[КЛИЕНТ] Нужен -peer")
+	}
+	if *vkHash == "" && activeVkAuthMode != "okru-native" {
+		log.Fatal("[КЛИЕНТ] Нужен -vk (или используйте -vk-auth=okru-native без -vk)")
 	}
 
 	peer, err := net.ResolveUDPAddr("udp", *peerAddr)
@@ -148,7 +151,11 @@ func main() {
 	}
 
 	hashes := ParseHashes(*vkHash)
-	if len(hashes) == 0 {
+	if activeVkAuthMode == "okru-native" && len(hashes) == 0 {
+		// okru-native doesn't need a VK link; use a single empty placeholder so
+		// the worker/group machinery runs with one credential slot.
+		hashes = []string{""}
+	} else if len(hashes) == 0 {
 		log.Fatal("[КЛИЕНТ] Нет хешей VK")
 	}
 
@@ -244,8 +251,16 @@ func main() {
 		captchaStatus = "RJS Go v2 with WBV Auto fallback"
 	}
 
+	authStatus := "VK anonymous (2 app_id, rotating)"
+	switch activeVkAuthMode {
+	case "account":
+		authStatus = "VK account (injected TURN creds)"
+	case "okru-native":
+		authStatus = "OK.ru native (no VK, no captcha)"
+	}
+
 	log.Println("[КЛИЕНТ] ═══════════════════════════════════════")
-	log.Printf("[КЛИЕНТ] VK Creds: 2 stable app_id с циклическим fallback")
+	log.Printf("[КЛИЕНТ] Auth: %s", authStatus)
 	log.Printf("[КЛИЕНТ] TLS: Chrome 146 fingerprint")
 	log.Printf("[КЛИЕНТ] Воркеров: %d (групп: %d, по %d)", *numW, numGroups, workersPerGroup)
 	log.Printf("[КЛИЕНТ] Хешей: %d", len(hashes))

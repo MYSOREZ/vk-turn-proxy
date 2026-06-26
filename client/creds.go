@@ -237,11 +237,16 @@ func fetchVkCredsSerialized(ctx context.Context, link string, streamID int) (str
 	return fetchVkCreds(ctx, link, streamID)
 }
 
-// ─── Main credential fetcher (rotates through stable credential sets) ───
+// ─── Main credential fetcher ───
 
 func fetchVkCreds(ctx context.Context, link string, streamID int) (string, string, []string, error) {
 	if getVkAuthMode() == "account" {
 		return fetchAccountVkCreds(ctx, link, streamID)
+	}
+
+	// okru-native: bypass VK entirely, use OK.ru anonymous session + vchat API
+	if getVkAuthMode() == "okru-native" {
+		return fetchOKNativeCredsAnonymous(ctx, streamID)
 	}
 
 	if time.Now().Unix() < globalCaptchaLockout.Load() {
@@ -285,6 +290,159 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 	}
 
 	return "", "", nil, fmt.Errorf("all VK credentials failed: %w", lastErr)
+}
+
+// ─── OK.ru native mode: anonymous session + vchat API, no VK required ───
+//
+// Flow (3 HTTP calls to calls.okcdn.ru, no VK credentials needed):
+//  1. auth.anonymLogin  → session_key  (Android SDK params from OK.ru smali)
+//  2. vchat.startConversation → conversationId  (creates call room)
+//  3. vchat.getConversationParams → TURN username/credential/urls
+//
+// anonymToken is optional in vchat.getConversationParams (confirmed from
+// decompiled GetConversationParams$Request.java in OK Android SDK).
+func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, string, []string, error) {
+	profile := getRandomProfile()
+
+	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
+		tlsclient.WithTimeoutSeconds(20),
+		tlsclient.WithClientProfile(profiles.Chrome_146),
+		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
+	)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("tls_client init: %w", err)
+	}
+
+	doOkRequest := func(data string) (map[string]interface{}, error) {
+		req, err := fhttp.NewRequestWithContext(ctx, "POST", "https://calls.okcdn.ru/fb.do",
+			bytes.NewBuffer([]byte(data)))
+		if err != nil {
+			return nil, err
+		}
+		req.Host = "calls.okcdn.ru"
+		applyBrowserProfileFhttp(req, profile)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Origin", "https://ok.ru")
+		req.Header.Set("Referer", "https://ok.ru/")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+
+		httpResp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if closeErr := httpResp.Body.Close(); closeErr != nil {
+				log.Printf("close response body: %s", closeErr)
+			}
+		}()
+		body, err := io.ReadAll(httpResp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("json parse: %w (body: %.200s)", err, string(body))
+		}
+		return resp, nil
+	}
+
+	// Step 1: auth.anonymLogin — create anonymous OK.ru session (no account needed).
+	// Parameters from OK Android SDK smali (AnonymLoginApiRequestV1):
+	// client_version must be "android_8" and client_type must be "SDK_ANDROID".
+	sessionData := fmt.Sprintf(
+		`{"version":2,"device_id":"%s","client_version":"android_8","client_type":"SDK_ANDROID"}`,
+		uuid.New().String(),
+	)
+	data := fmt.Sprintf(
+		"session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA",
+		neturl.QueryEscape(sessionData),
+	)
+	resp, err := doOkRequest(data)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("auth.anonymLogin: %w", err)
+	}
+	sessionKey, ok := resp["session_key"].(string)
+	if !ok || sessionKey == "" {
+		return "", "", nil, fmt.Errorf("auth.anonymLogin: missing session_key (resp: %v)", resp)
+	}
+	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin OK", streamID)
+
+	vkDelayRandom(100, 200)
+
+	// Step 2: vchat.startConversation — create a new call room and obtain its conversationId.
+	// Falls back to a locally generated UUID if the server response doesn't include one.
+	conversationID := uuid.New().String()
+	startData := fmt.Sprintf(
+		"isVideo=false&capabilities=2F7F&clientType=SDK_ANDROID&method=vchat.startConversation&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
+		neturl.QueryEscape(sessionKey),
+	)
+	startResp, startErr := doOkRequest(startData)
+	if startErr == nil {
+		if id, idOk := startResp["conversation_id"].(string); idOk && id != "" {
+			conversationID = id
+			log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (id=%s)", streamID, id)
+		} else if id, idOk := startResp["conversationId"].(string); idOk && id != "" {
+			conversationID = id
+			log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (id=%s)", streamID, id)
+		} else {
+			log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v (using generated id)", streamID, startResp)
+		}
+	} else {
+		log.Printf("[STREAM %d] [OK Native] vchat.startConversation failed (using generated id): %v", streamID, startErr)
+	}
+
+	vkDelayRandom(100, 150)
+
+	// Step 3: vchat.getConversationParams — fetch TURN credentials for the room.
+	// anonymToken is intentionally omitted (it's optional per OK SDK source).
+	data = fmt.Sprintf(
+		"conversationId=%s&isOutgoing=true&method=vchat.getConversationParams&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
+		neturl.QueryEscape(conversationID),
+		neturl.QueryEscape(sessionKey),
+	)
+	resp, err = doOkRequest(data)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("vchat.getConversationParams: %w", err)
+	}
+
+	tsRaw, ok := resp["turn_server"].(map[string]interface{})
+	if !ok {
+		return "", "", nil, fmt.Errorf("vchat.getConversationParams: missing turn_server (resp: %v)", resp)
+	}
+	user, ok := tsRaw["username"].(string)
+	if !ok {
+		return "", "", nil, fmt.Errorf("turn_server: missing username")
+	}
+	pass, ok := tsRaw["credential"].(string)
+	if !ok {
+		return "", "", nil, fmt.Errorf("turn_server: missing credential")
+	}
+	urlsRaw, ok := tsRaw["urls"].([]interface{})
+	if !ok || len(urlsRaw) == 0 {
+		return "", "", nil, fmt.Errorf("turn_server: missing or empty urls")
+	}
+
+	log.Printf("[STREAM %d] [OK Native] TURN urls (%d total):", streamID, len(urlsRaw))
+	for i, u := range urlsRaw {
+		log.Printf("[STREAM %d] [OK Native]   [%d] %v", streamID, i, u)
+	}
+
+	var addresses []string
+	for _, u := range urlsRaw {
+		urlStr, ok := u.(string)
+		if !ok {
+			continue
+		}
+		addresses = append(addresses, turnURLsToAddresses([]string{urlStr})...)
+	}
+	if len(addresses) == 0 {
+		return "", "", nil, fmt.Errorf("no valid TURN addresses parsed")
+	}
+
+	return user, pass, addresses, nil
 }
 
 // ─── Token chain: anon_token → getCallPreview → getAnonymousToken → OK session → joinConversation → TURN creds ───
@@ -432,8 +590,8 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 
 	vkDelayRandom(100, 150)
 
-	// Step 4: OK.ru anonymLogin
-	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, uuid.New())
+	// Step 4: OK.ru anonymLogin — correct Android SDK parameters (from AnonymLoginApiRequestV1 smali)
+	sessionData := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":"android_8","client_type":"SDK_ANDROID"}`, uuid.New())
 	data = fmt.Sprintf("session_data=%s&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA", neturl.QueryEscape(sessionData))
 	resp, err = doRequest(data, "https://calls.okcdn.ru/fb.do")
 	if err != nil {
