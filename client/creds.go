@@ -322,19 +322,6 @@ func okSig(params map[string]string, secretKey string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// buildOKForm encodes a params map as application/x-www-form-urlencoded body.
-// If secretKey is non-empty, computes and appends the sig parameter.
-func buildOKForm(params map[string]string, secretKey string) string {
-	if secretKey != "" {
-		params["sig"] = okSig(params, secretKey)
-	}
-	vals := make(neturl.Values)
-	for k, v := range params {
-		vals.Set(k, v)
-	}
-	return vals.Encode()
-}
-
 // ─── OK.ru native mode: anonymous session + vchat REST API, no VK required ───
 //
 // Flow:
