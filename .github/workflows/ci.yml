@@ -8,6 +8,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   check:
@@ -33,7 +34,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
-      - name: Run gofmt (check)
         run: |
           echo "Checking formatting with gofmt..."
           fmt_output=$(gofmt -l . || true)
