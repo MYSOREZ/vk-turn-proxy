@@ -324,10 +324,13 @@ func okSig(params map[string]string, secretKey string) string {
 
 // ─── OK.ru native mode: anonymous session + vchat REST API, no VK required ───
 //
+// Все три шага используют api.ok.ru — сессия, созданная там, валидна для vchat методов.
+// calls.okcdn.ru создаёт другой тип сессии, непригодный для api.ok.ru.
+//
 // Flow:
-//  1. auth.anonymLogin (calls.okcdn.ru/fb.do, form-encoded) → session_key + session_secret_key
-//  2. vchat.startConversation (api.ok.ru/api/vchat/startConversation, JSON body, auth in URL) → conversationId
-//  3. vchat.getConversationParams (api.ok.ru/api/vchat/getConversationParams, JSON body) → TURN creds
+//  1. auth.anonymLogin (api.ok.ru, APPLICATION scope: только application_key в URL) → session_key + session_secret_key
+//  2. vchat.startConversation (api.ok.ru, OPT_SESSION: + session_key + sig в URL) → conversationId
+//  3. vchat.getConversationParams (api.ok.ru, OPT_SESSION) → TURN creds
 func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, string, []string, error) {
 	const okAppKey = "CHKIPMKGDIHBABABA"
 
@@ -342,57 +345,22 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 		return "", "", nil, fmt.Errorf("tls_client init: %w", err)
 	}
 
-	// doOKFormRequest: legacy form-encoded endpoint (auth.anonymLogin only)
-	doOKFormRequest := func(data string) (map[string]interface{}, error) {
-		req, err := fhttp.NewRequestWithContext(ctx, "POST", "https://calls.okcdn.ru/fb.do",
-			bytes.NewBuffer([]byte(data)))
-		if err != nil {
-			return nil, err
-		}
-		req.Host = "calls.okcdn.ru"
-		applyBrowserProfileFhttp(req, profile)
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Origin", "https://ok.ru")
-		req.Header.Set("Referer", "https://ok.ru/")
-		req.Header.Set("Sec-Fetch-Site", "cross-site")
-		req.Header.Set("Sec-Fetch-Mode", "cors")
-		req.Header.Set("Sec-Fetch-Dest", "empty")
-
-		httpResp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			if closeErr := httpResp.Body.Close(); closeErr != nil {
-				log.Printf("close response body: %s", closeErr)
-			}
-		}()
-		body, err := io.ReadAll(httpResp.Body)
-		if err != nil {
-			return nil, err
-		}
-		var resp map[string]interface{}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("json parse: %w (body: %.200s)", err, string(body))
-		}
-		return resp, nil
-	}
-
-	// doOKApiRequest: REST JSON endpoint (api.ok.ru), auth params + sig in URL query string.
-	// Sig is computed over URL params (application_key + session_key) sorted alphabetically.
+	// doOKApiRequest: POST на api.ok.ru/api/<method> с JSON body.
+	// APPLICATION scope (sessionKey=""): только application_key в URL.
+	// OPT_SESSION scope (sessionKey!=""): добавляет session_key + sig в URL.
+	// Sig вычисляется по URL-параметрам (application_key + session_key), отсортированным.
 	doOKApiRequest := func(method string, sessionKey, secretKey string, bodyParams map[string]interface{}) (map[string]interface{}, error) {
-		urlAuthParams := map[string]string{
-			"application_key": okAppKey,
-			"session_key":     sessionKey,
+		apiURL := fmt.Sprintf("https://api.ok.ru/api/%s?application_key=%s",
+			method, neturl.QueryEscape(okAppKey))
+		if sessionKey != "" {
+			urlAuthParams := map[string]string{
+				"application_key": okAppKey,
+				"session_key":     sessionKey,
+			}
+			sig := okSig(urlAuthParams, secretKey)
+			apiURL += fmt.Sprintf("&session_key=%s&sig=%s",
+				neturl.QueryEscape(sessionKey), neturl.QueryEscape(sig))
 		}
-		sig := okSig(urlAuthParams, secretKey)
-		apiURL := fmt.Sprintf("https://api.ok.ru/api/%s?application_key=%s&session_key=%s&sig=%s",
-			method,
-			neturl.QueryEscape(okAppKey),
-			neturl.QueryEscape(sessionKey),
-			neturl.QueryEscape(sig),
-		)
 		jsonBody, marshalErr := json.Marshal(bodyParams)
 		if marshalErr != nil {
 			return nil, fmt.Errorf("marshal json: %w", marshalErr)
@@ -432,17 +400,15 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 		return resp, nil
 	}
 
-	// Step 1: auth.anonymLogin — create anonymous OK.ru session.
-	// Uses legacy form endpoint; parameters from AnonymLoginApiRequestV1 smali.
-	sessionData := fmt.Sprintf(
-		`{"version":2,"device_id":"%s","client_version":"android_8","client_type":"SDK_ANDROID"}`,
-		uuid.New().String(),
-	)
-	formData := fmt.Sprintf(
-		"session_data=%s&method=auth.anonymLogin&format=JSON&application_key=%s",
-		neturl.QueryEscape(sessionData), okAppKey,
-	)
-	resp, err := doOKFormRequest(formData)
+	// Шаг 1: auth.anonymLogin — создаём анонимную сессию на api.ok.ru.
+	// APPLICATION scope: session_key/sig не нужны, только application_key в URL.
+	// Сессия, созданная здесь, валидна для последующих вызовов на api.ok.ru.
+	resp, err := doOKApiRequest("auth/anonymLogin", "", "", map[string]interface{}{
+		"version":        2,
+		"device_id":      uuid.New().String(),
+		"client_version": "android_8",
+		"client_type":    "SDK_ANDROID",
+	})
 	if err != nil {
 		return "", "", nil, fmt.Errorf("auth.anonymLogin: %w", err)
 	}
@@ -451,13 +417,13 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 		return "", "", nil, fmt.Errorf("auth.anonymLogin: missing session_key (resp: %v)", resp)
 	}
 	secretKey, _ := resp["session_secret_key"].(string)
-	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin full resp: %v", streamID, resp)
 	log.Printf("[STREAM %d] [OK Native] auth.anonymLogin OK — session_key len=%d has_secret=%v", streamID, len(sessionKey), secretKey != "")
 
 	vkDelayRandom(100, 200)
 
-	// Step 2: vchat.startConversation — create a call room via REST JSON API.
-	// turnServers is required (string). Sig covers URL params only.
+	// Шаг 2: vchat.startConversation — создаём комнату звонка.
+	// OPT_SESSION scope: session_key + sig в URL, JSON body.
+	// turnServers — обязательная строка (из смали StartConversation$Request).
 	conversationID := uuid.New().String()
 	startResp, startErr := doOKApiRequest("vchat/startConversation", sessionKey, secretKey, map[string]interface{}{
 		"isVideo":                false,
@@ -477,16 +443,15 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	} else if id, idOk := startResp["conversationId"].(string); idOk && id != "" {
 		conversationID = id
 	}
-	log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (using id=%s)", streamID, conversationID)
+	log.Printf("[STREAM %d] [OK Native] using conversationId=%s", streamID, conversationID)
 
-	// If startConversation already returned TURN creds, use them directly.
 	if tsRaw, hasTurn := startResp["turn_server"].(map[string]interface{}); hasTurn {
 		return extractOKTurnCreds(tsRaw, streamID)
 	}
 
 	vkDelayRandom(100, 150)
 
-	// Step 3: vchat.getConversationParams — fetch TURN credentials.
+	// Шаг 3: vchat.getConversationParams — получаем TURN credentials.
 	getResp, getErr := doOKApiRequest("vchat/getConversationParams", sessionKey, secretKey, map[string]interface{}{
 		"conversationId": conversationID,
 	})
