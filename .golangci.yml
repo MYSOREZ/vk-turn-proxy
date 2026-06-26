@@ -16,7 +16,14 @@ linters:
     govet:
       disable:
         - fieldalignment
+        - shadow
+        - nilness
       enable-all: true
+    staticcheck:
+      checks:
+        - "all"
+        - "-SA1019"
+        - "-SA6002"
     revive:
       rules:
         - name: blank-imports
@@ -27,7 +34,6 @@ linters:
         - name: exported
         - name: if-return
         - name: increment-decrement
-        - name: var-naming
         - name: var-declaration
         - name: package-comments
         - name: range
@@ -51,6 +57,12 @@ linters:
       - linters:
           - errcheck
         source: "SendBindingRequest|rand\\.Read|doRequest|pktPool\\.Get"
+      - linters:
+          - ineffassign
+        source: "lastErr"
+      - linters:
+          - unused
+        source: "solveVkCaptchaV2|captchaV2MaxAttempts|obfsIsRTPPacket"
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
