@@ -34,6 +34,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      - name: Run gofmt (check)
         run: |
           echo "Checking formatting with gofmt..."
           fmt_output=$(gofmt -l . || true)
