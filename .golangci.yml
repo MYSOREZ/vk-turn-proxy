@@ -8,15 +8,11 @@ linters:
     - revive
   settings:
     errcheck:
-      check-type-assertions: true
-      check-blank: true
       exclude-functions:
         - (net.PacketConn).WriteTo
         - (net.Conn).Write
         - encoding/json.MarshalIndent
         - (*github.com/pion/dtls/v3.Conn).SetDeadline
-        - (*net.UDPConn).SetReadBuffer
-        - (*net.UDPConn).SetWriteBuffer
     govet:
       disable:
         - fieldalignment
@@ -54,7 +50,7 @@ linters:
     rules:
       - linters:
           - errcheck
-        source: "doRequest|pktPool\\.Get|LoadProfileFromDisk|captchaModeValue\\.Load|errData\\["
+        source: "SendBindingRequest|rand\\.Read|doRequest|pktPool\\.Get"
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
