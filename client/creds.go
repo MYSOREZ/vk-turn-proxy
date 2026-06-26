@@ -377,26 +377,25 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 
 	vkDelayRandom(100, 200)
 
-	// Step 2: vchat.startConversation — create a new call room and obtain its conversationId.
-	// Falls back to a locally generated UUID if the server response doesn't include one.
+	// Step 2: vchat.startConversation — create a new call room using a client-generated UUID.
+	// The server expects conversationId as an INPUT parameter (client-assigned ID).
 	conversationID := uuid.New().String()
 	startData := fmt.Sprintf(
-		"isVideo=false&capabilities=2F7F&clientType=SDK_ANDROID&method=vchat.startConversation&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
+		"conversationId=%s&isVideo=false&capabilities=2F7F&clientType=SDK_ANDROID&method=vchat.startConversation&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
+		neturl.QueryEscape(conversationID),
 		neturl.QueryEscape(sessionKey),
 	)
 	startResp, startErr := doOkRequest(startData)
 	if startErr == nil {
+		log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v", streamID, startResp)
 		if id, idOk := startResp["conversation_id"].(string); idOk && id != "" {
 			conversationID = id
-			log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (id=%s)", streamID, id)
 		} else if id, idOk := startResp["conversationId"].(string); idOk && id != "" {
 			conversationID = id
-			log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (id=%s)", streamID, id)
-		} else {
-			log.Printf("[STREAM %d] [OK Native] vchat.startConversation resp: %v (using generated id)", streamID, startResp)
 		}
+		log.Printf("[STREAM %d] [OK Native] vchat.startConversation OK (using id=%s)", streamID, conversationID)
 	} else {
-		log.Printf("[STREAM %d] [OK Native] vchat.startConversation failed (using generated id): %v", streamID, startErr)
+		log.Printf("[STREAM %d] [OK Native] vchat.startConversation failed: %v", streamID, startErr)
 	}
 
 	vkDelayRandom(100, 150)
