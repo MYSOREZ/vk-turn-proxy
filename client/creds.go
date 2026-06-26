@@ -383,7 +383,7 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	startData := fmt.Sprintf(
 		"conversationId=%s&isVideo=false&capabilities=2F7F&clientType=SDK_ANDROID&method=vchat.startConversation&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
 		neturl.QueryEscape(conversationID),
-		neturl.QueryEscape(sessionKey),
+		sessionKey,
 	)
 	startResp, startErr := doOkRequest(startData)
 	if startErr == nil {
@@ -405,7 +405,7 @@ func fetchOKNativeCredsAnonymous(ctx context.Context, streamID int) (string, str
 	data = fmt.Sprintf(
 		"conversationId=%s&isOutgoing=true&method=vchat.getConversationParams&format=JSON&application_key=CGMMEJLGDIHBABABA&session_key=%s",
 		neturl.QueryEscape(conversationID),
-		neturl.QueryEscape(sessionKey),
+		sessionKey,
 	)
 	resp, err = doOkRequest(data)
 	if err != nil {
