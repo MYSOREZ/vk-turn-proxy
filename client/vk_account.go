@@ -34,12 +34,14 @@ type vkCredsFile struct {
 
 var (
 	vkAuthModeValue     atomic.Value
+	vkAnonPathValue     atomic.Value
 	injectedCredsMu     sync.RWMutex
 	injectedCredsByLink map[string]injectedTurnCreds
 )
 
 func init() {
 	vkAuthModeValue.Store("anonymous")
+	vkAnonPathValue.Store("vkcalls")
 	injectedCredsByLink = make(map[string]injectedTurnCreds)
 }
 
@@ -61,6 +63,24 @@ func getVkAuthMode() string {
 		return "anonymous"
 	}
 	return mode
+}
+
+func setVkAnonPath(path string) string {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "legacy" {
+		vkAnonPathValue.Store("legacy")
+		return "legacy"
+	}
+	vkAnonPathValue.Store("vkcalls")
+	return "vkcalls"
+}
+
+func getVkAnonPath() string {
+	path, _ := vkAnonPathValue.Load().(string)
+	if path == "" {
+		return "vkcalls"
+	}
+	return path
 }
 
 func drainTurnCredsResult() {
