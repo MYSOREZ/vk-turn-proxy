@@ -42,7 +42,8 @@ var (
 	errCaptchaV2RateLimit = errors.New("captcha session rate limit reached")
 	errCaptchaV2Bot       = errors.New("captcha bot challenge")
 
-	captchaV2MaxAttempts = 2
+	captchaV2MaxAttempts     = 2
+	captchaV2MaxSliderChecks = 2
 
 	captchaV2DebugCache  sync.Map // scriptURL -> string
 	captchaV2HeaderOrder = []string{
@@ -263,6 +264,33 @@ func captchaV2BaseValues(sessionToken string) [][2]string {
 	}
 }
 
+func isCaptchaSessionExhausted(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errCaptchaV2RateLimit) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "getcontent status:") ||
+		strings.Contains(msg, "error_limit") ||
+		strings.Contains(msg, "rate limit")
+}
+
+func captchaV2DeviceJSON(savedProfile *SavedProfile) string {
+	if savedProfile != nil && strings.TrimSpace(savedProfile.DeviceJSON) != "" {
+		return savedProfile.DeviceJSON
+	}
+	return captchaV2DeviceInfo
+}
+
+func captchaV2AcceptLanguage(profile Profile) string {
+	if strings.Contains(profile.SecChUaMobile, "?1") {
+		return "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+	}
+	return "en-US,en;q=0.9"
+}
+
 func captchaV2BrowserFP() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -426,10 +454,7 @@ func (s *captchaV2Session) solveCheckboxCaptcha(
 	hash string,
 	debugInfo string,
 ) (string, error) {
-	deviceJSON := captchaV2DeviceInfo
-	if s.savedProfile != nil && strings.TrimSpace(s.savedProfile.DeviceJSON) != "" {
-		deviceJSON = s.savedProfile.DeviceJSON
-	}
+	deviceJSON := captchaV2DeviceJSON(s.savedProfile)
 	if _, err := s.captchaRequest("captchaNotRobot.componentDone", [][2]string{
 		{"session_token", sessionToken},
 		{"domain", "vk.com"},
@@ -444,7 +469,7 @@ func (s *captchaV2Session) solveCheckboxCaptcha(
 	select {
 	case <-s.ctx.Done():
 		return "", s.ctx.Err()
-	case <-time.After(time.Duration(400+mathrand.Intn(250)) * time.Millisecond):
+	case <-time.After(time.Duration(800+mathrand.Intn(500)) * time.Millisecond):
 	}
 
 	check, err := s.performCaptchaCheck(sessionToken, browserFP, hash, "{}", "[]", debugInfo)
@@ -595,7 +620,7 @@ func applyBrowserProfileFhttp(req *fhttp.Request, profile Profile) {
 	req.Header.Set("sec-ch-ua", profile.SecChUa)
 	req.Header.Set("sec-ch-ua-mobile", profile.SecChUaMobile)
 	req.Header.Set("sec-ch-ua-platform", profile.SecChUaPlatform)
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Language", captchaV2AcceptLanguage(profile))
 	req.Header.Set("DNT", "1")
 }
 
@@ -606,14 +631,39 @@ type VkCaptchaError struct {
 	CaptchaSid     string
 	RedirectURI    string
 	SessionToken   string
-	CaptchaTs      string
+	CaptchaTS      string
 	CaptchaAttempt string
 	CaptchaImg     string
 }
 
+func (e *VkCaptchaError) Error() string {
+	if e == nil {
+		return "VK captcha required"
+	}
+	if e.ErrorCode != 0 && e.ErrorCode != 14 {
+		if e.ErrorMsg != "" {
+			return fmt.Sprintf("VK API error %d: %s", e.ErrorCode, e.ErrorMsg)
+		}
+		return fmt.Sprintf("VK API error %d", e.ErrorCode)
+	}
+	if e.RedirectURI != "" {
+		return fmt.Sprintf("VK captcha required: redirect_uri, sid=%q", e.CaptchaSid)
+	}
+	if e.CaptchaImg != "" {
+		return fmt.Sprintf("VK captcha required: captcha_img, sid=%q", e.CaptchaSid)
+	}
+	if e.CaptchaSid != "" {
+		return fmt.Sprintf("VK captcha required: sid=%q", e.CaptchaSid)
+	}
+	if e.ErrorMsg != "" {
+		return fmt.Sprintf("VK captcha required: %s", e.ErrorMsg)
+	}
+	return "VK captcha required"
+}
+
 func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	codeFloat, _ := errData["error_code"].(float64)
-	redirectUri, _ := errData["redirect_uri"].(string)
+	redirectURI, _ := errData["redirect_uri"].(string)
 	errorMsg, _ := errData["error_msg"].(string)
 	captchaImg, _ := errData["captcha_img"].(string)
 
@@ -625,17 +675,17 @@ func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	}
 
 	var sessionToken string
-	if redirectUri != "" {
-		if parsed, err := neturl.Parse(redirectUri); err == nil {
+	if redirectURI != "" {
+		if parsed, err := neturl.Parse(redirectURI); err == nil {
 			sessionToken = parsed.Query().Get("session_token")
 		}
 	}
 
-	var captchaTs string
+	var captchaTS string
 	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
-		captchaTs = fmt.Sprintf("%.0f", tsFloat)
+		captchaTS = fmt.Sprintf("%.0f", tsFloat)
 	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
-		captchaTs = tsStr
+		captchaTS = tsStr
 	}
 
 	var captchaAttempt string
@@ -650,9 +700,9 @@ func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 		ErrorMsg:       errorMsg,
 		CaptchaSid:     captchaSid,
 		CaptchaImg:     captchaImg,
-		RedirectURI:    redirectUri,
+		RedirectURI:    redirectURI,
 		SessionToken:   sessionToken,
-		CaptchaTs:      captchaTs,
+		CaptchaTS:      captchaTS,
 		CaptchaAttempt: captchaAttempt,
 	}
 }

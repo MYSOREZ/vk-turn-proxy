@@ -62,7 +62,7 @@ func NewObfsConfig() *ObfsConfig {
 type ObfsState struct {
 	mu      sync.Mutex
 	initSeq uint16
-	initTs  uint32
+	initTS  uint32
 	count   uint64
 }
 
@@ -72,7 +72,7 @@ func NewObfsState() *ObfsState {
 	rand.Read(buf[:])
 	return &ObfsState{
 		initSeq: binary.BigEndian.Uint16(buf[0:2]),
-		initTs:  binary.BigEndian.Uint32(buf[2:6]),
+		initTS:  binary.BigEndian.Uint32(buf[2:6]),
 		count:   0,
 	}
 }
@@ -101,7 +101,7 @@ func obfsWrapPacket(key, payload []byte, cfg *ObfsConfig, state *ObfsState) ([]b
 	state.mu.Unlock()
 
 	seq := state.initSeq + uint16(c)
-	ts := state.initTs + uint32(c)*960 + uint32(c>>16)
+	ts := state.initTS + uint32(c)*960 + uint32(c>>16)
 
 	nonce := obfsBuildNonce(cfg.SSRC, seq, ts)
 

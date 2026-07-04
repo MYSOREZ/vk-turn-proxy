@@ -127,16 +127,21 @@ func main() {
 	connPassword := flag.String("password", "", "пароль подключения")
 	captchaMode := flag.String("captcha-mode", "auto", "режим обхода капчи (auto/wv/rjs)")
 	vkAuthMode := flag.String("vk-auth", "anonymous", "режим VK авторизации (account/anonymous)")
+	vkAnonPath := flag.String("vk-anon-path", "vkcalls", "анонимный путь VK TURN (vkcalls/legacy)")
 	vkCredsFile := flag.String("vk-creds-file", "", "файл с TURN кредами от аккаунта VK")
 
 	flag.Parse()
 	activeCaptchaMode := setCaptchaMode(*captchaMode)
 	activeVkAuthMode := setVkAuthMode(*vkAuthMode)
+	activeVkAnonPath := setVkAnonPath(*vkAnonPath)
 
 	if err := loadVkCredsFile(*vkCredsFile); err != nil {
 		log.Fatalf("[КЛИЕНТ] Ошибка чтения vk-creds-file: %v", err)
 	}
 	log.Printf("[КЛИЕНТ] VK auth mode: %s", activeVkAuthMode)
+	if activeVkAuthMode == "anonymous" {
+		log.Printf("[КЛИЕНТ] VK anon path: %s", activeVkAnonPath)
+	}
 
 	if *peerAddr == "" || *vkHash == "" {
 		log.Fatal("[КЛИЕНТ] Нужны -peer и -vk")

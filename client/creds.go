@@ -248,6 +248,17 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 		return "", "", nil, fmt.Errorf("CAPTCHA_WAIT_REQUIRED: global lockout active")
 	}
 
+	if getVkAnonPath() == "vkcalls" {
+		user, pass, addrs, err := getVKCredsViaVKCallsPath(ctx, link, streamID)
+		if err == nil {
+			log.Printf("[STREAM %d] [VK Auth] Success via VK Calls path", streamID)
+			return user, pass, addrs, nil
+		}
+		log.Printf("[STREAM %d] [VK Auth] VK Calls path failed (%s), falling back to legacy", streamID, describeVKCallsFailure(err))
+	} else {
+		log.Printf("[STREAM %d] [VK Auth] Legacy path selected, skipping VK Calls", streamID)
+	}
+
 	var lastErr error
 	jar := tlsclient.NewCookieJar()
 
@@ -291,6 +302,10 @@ func fetchVkCreds(ctx context.Context, link string, streamID int) (string, strin
 
 func getTokenChain(ctx context.Context, link string, streamID int, creds VKCredentials, jar tlsclient.CookieJar) (string, string, []string, error) {
 	profile := getRandomProfile()
+	if saved, err := LoadProfileFromDisk(); err == nil && saved != nil && strings.TrimSpace(saved.UserAgent) != "" {
+		profile = saved.Profile
+		log.Printf("[STREAM %d] [VK Auth] Используем профиль устройства из vk_profile.json", streamID)
+	}
 
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
 		tlsclient.WithTimeoutSeconds(20),
@@ -413,7 +428,7 @@ func getTokenChain(ctx context.Context, link string, streamID int, creds VKCrede
 				}
 
 				data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=%s&captcha_key=&captcha_sid=%s&is_sound_captcha=0&success_token=%s&captcha_ts=%s&captcha_attempt=%s&access_token=%s",
-					link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTs, captchaAttempt, token1)
+					link, escapedName, captchaErr.CaptchaSid, neturl.QueryEscape(successToken), captchaErr.CaptchaTS, captchaAttempt, token1)
 				continue
 			}
 			return "", "", nil, fmt.Errorf("VK API error: %v", errObj)
@@ -513,6 +528,10 @@ func solveCaptchaBySelectedMode(
 		if ctx.Err() != nil {
 			return "", solveErr
 		}
+		if isCaptchaSessionExhausted(solveErr) {
+			log.Printf("[STREAM %d] [КАПЧА] RJS: сессия капчи исчерпана, открываем WebView", streamID)
+			return requestWebViewCaptcha(streamID, captchaErr, "auto", captchaAutoWebViewTimeout)
+		}
 		log.Printf("[STREAM %d] [КАПЧА] RJS: ошибка, fallback на WBV Auto: %v", streamID, solveErr)
 		return requestWebViewCaptcha(streamID, captchaErr, "auto", captchaAutoWebViewTimeout)
 	}
@@ -528,6 +547,14 @@ func solveCaptchaBySelectedMode(
 		return "", solveErr
 	}
 	lastErr := solveErr
+	if isCaptchaSessionExhausted(solveErr) {
+		log.Printf("[STREAM %d] [КАПЧА] AUTO: сессия капчи исчерпана, сразу ручной WebView", streamID)
+		token, solveErr = requestWebViewCaptcha(streamID, captchaErr, "manual", captchaManualWebViewTimeout)
+		if solveErr == nil {
+			return token, nil
+		}
+		return "", solveErr
+	}
 	log.Printf("[STREAM %d] [КАПЧА] AUTO: Go v2 не решил за 2 попытки: %v", streamID, solveErr)
 
 	for wbvAttempt := 1; wbvAttempt <= 2; wbvAttempt++ {
@@ -662,7 +689,6 @@ func setupGlobalResolver() {
 				if err == nil {
 					return conn, nil
 				}
-				lastErr = err
 				conn, err = dialer.DialContext(ctx, "tcp", dns)
 				if err == nil {
 					return conn, nil

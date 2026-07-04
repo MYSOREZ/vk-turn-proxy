@@ -215,6 +215,7 @@ docker run --rm -p 56000:56000/udp \
 | `-device-id` | `unknown` | ID устройства (для логов) |
 | `-captcha-mode` | `auto` | режим капчи: `auto`, `wv` (WebView), `rjs` (Go solver) |
 | `-vk-auth` | `anonymous` | режим авторизации VK: `anonymous` или `account` |
+| `-vk-anon-path` | `vkcalls` | анонимный путь получения TURN-кредов: `vkcalls` (основной, через api.vk.me) или `legacy` (старая цепочка через login.vk.ru/api.vk.ru) |
 | `-vk-creds-file` | пусто | JSON-файл с TURN-кредами от аккаунта VK |
 | `-stats-interval` | `30` | интервал статистики в секундах (`0` = выключить) |
 | `-turn` | из ссылки | переопределить IP TURN-сервера |
