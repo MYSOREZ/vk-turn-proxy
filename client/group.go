@@ -216,12 +216,17 @@ func WorkerGroup(
 						log.Printf("[ВОРКЕР #%d] Ошибка (попытка %d): %s", wid, attempt, errStr)
 					}
 
-					// Если ошибка STUN (credentials invalid), воркер не сможет переподключиться. Завершаем.
-					isStunDeath := strings.Contains(errStrLower, "error 29") ||
-						strings.Contains(errStrLower, "cannot create socket")
+					// "error 29" — устойчивая ошибка со стороны ВК (бан/квота/флуд-контроль на
+					// стороне сервиса), повторные попытки её не исправят. "cannot create socket"
+					// НЕ считаем фатальным: это чаще всего временная локальная проблема (у
+					// телефона совсем нет сети — метро, самолётный режим, доступ к сокетам
+					// временно ограничен ОС), а не смерть TURN/STUN-кредов. Раньше оба случая
+					// приводили к необратимому завершению воркера: после выхода из метро клиент
+					// оставался мёртвым навсегда, хотя сеть уже восстановилась.
+					isVkRejection := strings.Contains(errStrLower, "error 29")
 
-					if isStunDeath {
-						log.Printf("[ВОРКЕР #%d] Невосстановимая TURN/STUN ошибка, завершение: %s", wid, errStr)
+					if isVkRejection {
+						log.Printf("[ВОРКЕР #%d] Невосстановимая ошибка со стороны ВК, завершение: %s", wid, errStr)
 						return
 					}
 				}

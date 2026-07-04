@@ -25,6 +25,10 @@ const (
 	socketBufSize      = 625 * 1024
 	keepaliveByte      = 0xFF
 	keepaliveInterval  = 15 * time.Second
+	// deadPeerTimeout — если за это время не пришло вообще ни одного байта от
+	// сервера (ни данных, ни ответного keepalive), считаем сессию мёртвой и
+	// пересоздаём её, вместо того чтобы бесконечно ждать на молчащем UDP-сокете.
+	deadPeerTimeout = 45 * time.Second
 )
 
 // Handshake semaphore: limit to 3 concurrent DTLS handshakes
@@ -328,7 +332,14 @@ func RunSession(
 	defer d.Unregister(slot)
 
 	var proxyWg sync.WaitGroup
-	proxyWg.Add(3)
+	proxyWg.Add(4)
+
+	// lastRecv — момент последнего успешно прочитанного байта от сервера (данные
+	// или keepalive-ответ). Watchdog ниже использует это, чтобы отличить реальный
+	// обрыв (сервер не отвечает вообще) от обычного затишья в трафике.
+	var lastRecv int64
+	atomic.StoreInt64(&lastRecv, time.Now().UnixNano())
+	var deadPeerErr error
 
 	stopDTLS := context.AfterFunc(sessCtx, func() {
 		_ = dtlsConn.SetDeadline(time.Now())
@@ -338,6 +349,7 @@ func RunSession(
 	// DTLS Keepalive
 	go func() {
 		defer proxyWg.Done()
+		defer sessCancel()
 		t := time.NewTicker(keepaliveInterval)
 		defer t.Stop()
 		ping := []byte{keepaliveByte}
@@ -348,6 +360,30 @@ func RunSession(
 			case <-t.C:
 				_ = dtlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if _, err := dtlsConn.Write(ping); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Watchdog: если за deadPeerTimeout не пришло вообще ничего от сервера —
+	// ни полезных данных, ни keepalive-ответа — считаем сессию мёртвой и
+	// завершаем её явной ошибкой, чтобы верхнеуровневый retry в WorkerGroup
+	// пересоздал туннель, а не ждал неопределённо долго на молчащем UDP.
+	go func() {
+		defer proxyWg.Done()
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-sessCtx.Done():
+				return
+			case <-t.C:
+				last := time.Unix(0, atomic.LoadInt64(&lastRecv))
+				if time.Since(last) > deadPeerTimeout {
+					deadPeerErr = fmt.Errorf("нет ответа от сервера %s подряд, сессия считается разорванной", deadPeerTimeout)
+					log.Printf("[ВОРКЕР #%d] %v", sessionID, deadPeerErr)
+					sessCancel()
 					return
 				}
 			}
@@ -397,6 +433,8 @@ func RunSession(
 				return
 			}
 
+			atomic.StoreInt64(&lastRecv, time.Now().UnixNano())
+
 			if n == 1 && b[0] == keepaliveByte {
 				continue
 			}
@@ -421,6 +459,9 @@ func RunSession(
 	_ = pipeA.Close()
 	_ = pipeB.Close()
 	log.Printf("[СЕССИЯ #%d] Завершена", sessionID)
+	if deadPeerErr != nil {
+		return configDelivered, deadPeerErr
+	}
 	return configDelivered, nil
 }
 
