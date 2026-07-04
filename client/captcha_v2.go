@@ -631,7 +631,7 @@ type VkCaptchaError struct {
 	CaptchaSid     string
 	RedirectURI    string
 	SessionToken   string
-	CaptchaTs      string
+	CaptchaTS      string
 	CaptchaAttempt string
 	CaptchaImg     string
 }
@@ -663,7 +663,7 @@ func (e *VkCaptchaError) Error() string {
 
 func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	codeFloat, _ := errData["error_code"].(float64)
-	redirectUri, _ := errData["redirect_uri"].(string)
+	redirectURI, _ := errData["redirect_uri"].(string)
 	errorMsg, _ := errData["error_msg"].(string)
 	captchaImg, _ := errData["captcha_img"].(string)
 
@@ -675,17 +675,17 @@ func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 	}
 
 	var sessionToken string
-	if redirectUri != "" {
-		if parsed, err := neturl.Parse(redirectUri); err == nil {
+	if redirectURI != "" {
+		if parsed, err := neturl.Parse(redirectURI); err == nil {
 			sessionToken = parsed.Query().Get("session_token")
 		}
 	}
 
-	var captchaTs string
+	var captchaTS string
 	if tsFloat, ok := errData["captcha_ts"].(float64); ok {
-		captchaTs = fmt.Sprintf("%.0f", tsFloat)
+		captchaTS = fmt.Sprintf("%.0f", tsFloat)
 	} else if tsStr, ok := errData["captcha_ts"].(string); ok {
-		captchaTs = tsStr
+		captchaTS = tsStr
 	}
 
 	var captchaAttempt string
@@ -700,9 +700,9 @@ func parseVkCaptchaError(errData map[string]interface{}) *VkCaptchaError {
 		ErrorMsg:       errorMsg,
 		CaptchaSid:     captchaSid,
 		CaptchaImg:     captchaImg,
-		RedirectURI:    redirectUri,
+		RedirectURI:    redirectURI,
 		SessionToken:   sessionToken,
-		CaptchaTs:      captchaTs,
+		CaptchaTS:      captchaTS,
 		CaptchaAttempt: captchaAttempt,
 	}
 }
