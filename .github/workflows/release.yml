@@ -8,6 +8,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Manual release version (e.g. "1.2.3" or "v1.2.3"). Leave empty for automatic semver bump from commit messages.'
+        required: false
+        type: string
 
 jobs:
   build:
@@ -193,6 +198,8 @@ jobs:
 
       - name: Prepare release metadata
         id: meta
+        env:
+          MANUAL_VERSION: ${{ github.event.inputs.version }}
         run: |
           LATEST_TAG="$(git tag -l | grep -E '^(v)?[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
           PREFIX=""
@@ -205,33 +212,50 @@ jobs:
             BASE_VERSION="${LATEST_TAG#v}"
           fi
 
-          IFS=. read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
-
           if [ -n "$LATEST_TAG" ]; then
             RANGE="$LATEST_TAG..HEAD"
           else
             RANGE="HEAD"
           fi
 
-          COMMITS="$(git log --no-merges --format='%s' "$RANGE")"
-          BUMP=""
+          if [ -n "$MANUAL_VERSION" ]; then
+            # Manual override: use the version given via workflow_dispatch as-is,
+            # validated against a plain (v)X.Y.Z shape. Skips the conventional-commit
+            # bump detection below entirely.
+            CANDIDATE="$(printf '%s' "$MANUAL_VERSION" | tr -d '[:space:]')"
+            if ! printf '%s' "$CANDIDATE" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Invalid version input '$MANUAL_VERSION' — expected format X.Y.Z or vX.Y.Z"
+              exit 1
+            fi
+            if [ "$CANDIDATE" = "$LATEST_TAG" ]; then
+              echo "::error::Version '$CANDIDATE' matches the latest existing tag; choose a new version"
+              exit 1
+            fi
 
-          if printf '%s\n' "$COMMITS" | grep -Eiq '^break([(:! ]|$)'; then
-            BUMP="major"
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-          elif printf '%s\n' "$COMMITS" | grep -Eiq '^feat([(:! ]|$)'; then
-            BUMP="minor"
-            MINOR=$((MINOR + 1))
-            PATCH=0
-          elif printf '%s\n' "$COMMITS" | grep -Eiq '^(fix|perf|refactor)([(:! ]|$)'; then
-            BUMP="patch"
-            PATCH=$((PATCH + 1))
+            NEXT_TAG="$CANDIDATE"
+            BUMP="manual"
+          else
+            IFS=. read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+
+            COMMITS="$(git log --no-merges --format='%s' "$RANGE")"
+            BUMP=""
+
+            if printf '%s\n' "$COMMITS" | grep -Eiq '^break([(:! ]|$)'; then
+              BUMP="major"
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+            elif printf '%s\n' "$COMMITS" | grep -Eiq '^feat([(:! ]|$)'; then
+              BUMP="minor"
+              MINOR=$((MINOR + 1))
+              PATCH=0
+            elif printf '%s\n' "$COMMITS" | grep -Eiq '^(fix|perf|refactor)([(:! ]|$)'; then
+              BUMP="patch"
+              PATCH=$((PATCH + 1))
+            fi
+
+            NEXT_TAG="${PREFIX}${MAJOR}.${MINOR}.${PATCH}"
           fi
-
-          NEXT_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          NEXT_TAG="${PREFIX}${NEXT_VERSION}"
 
           {
             echo "previous_tag=$LATEST_TAG"
@@ -306,7 +330,7 @@ jobs:
         if: steps.meta.outputs.should_release != 'true'
         run: |
           echo "No new semantic release created."
-          echo "Add a commit starting with break, feat, or fix after the latest tag."
+          echo "Add a commit starting with break, feat, or fix after the latest tag, or re-run this workflow with a manual version input."
 
   docker:
     name: Publish Docker image
