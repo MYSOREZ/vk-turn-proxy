@@ -171,6 +171,7 @@ jobs:
         with:
           name: good-turn-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/**
+          retention-days: 7
 
   release:
     name: Create GitHub Release
